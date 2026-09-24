@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import pathlib
+import shutil
 import sys
 import tempfile
 
@@ -64,6 +65,26 @@ def touches_prod(value: object) -> str | None:
 
 
 @pytest.fixture(autouse=True)
+def _fresh_sandbox():
+    """Wipe the throwaway tree before every test.
+
+    One sandbox is shared by the whole session, so a test that leaves a queue entry or a
+    status.json behind would change what the next test sees (queue_depth, oldest_job,
+    load_metrics...). Resetting keeps every test independent without needing a new temp
+    root per test.
+    """
+    for child in SANDBOX.iterdir():
+        if child.is_dir():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink()
+    for rel in ("load/dispatch/queue", "load/dispatch/done", "load/run",
+                "runs", "bench", "static", "hf", "bin"):
+        _mk(*rel.split("/"))
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _guard_production_paths():
     """Fail loudly if a test leaves the sandbox."""
     yield
@@ -81,6 +102,22 @@ def _guard_production_paths():
 def sandbox() -> pathlib.Path:
     """The throwaway root every RUNBOARD_* variable points at."""
     return SANDBOX
+
+
+@pytest.fixture
+def run_dir(sandbox) -> pathlib.Path:
+    """``$RUNBOARD_LOAD/run`` -- where the runner writes state.json and requests.jsonl."""
+    d = SANDBOX / "load" / "run"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+@pytest.fixture
+def bench(sandbox) -> pathlib.Path:
+    """``$RUNBOARD_BENCH`` -- where the banked run artifacts live (``runs/`` included)."""
+    d = SANDBOX / "bench"
+    (d / "runs").mkdir(parents=True, exist_ok=True)
+    return d
 
 
 @pytest.fixture
