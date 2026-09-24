@@ -290,6 +290,28 @@ def test_an_explicit_serve_that_does_not_answer_is_a_failed_job(load_tree, calls
     assert "does not answer" in status_doc()["error"]
 
 
+def test_a_runner_that_exits_nonzero_still_finishes_the_job_as_done(load_tree, calls,
+                                                                    monkeypatch):
+    """Pins observed behaviour, NOT a claim that it is right.
+
+    ``main()`` only sets ``error`` from an exception; the runner's own exit code is carried
+    inside the result. So a preset run that failed every row finishes as ``state: done`` with
+    ``result.rc == 1``. Reported in MISSION_REPORT.md as an operator decision, not changed here,
+    because the console's "done" may be intended to mean "the job executed".
+    """
+    monkeypatch.setattr(dispatcher.subprocess, "Popen",
+                        fake_popen(rc=1, lines=("row 1 FAILED",), polls_before_exit=2))
+    monkeypatch.setattr(dispatcher, "live_engine", lambda: _serving("cruz"))
+    queue_job({"job_id": "m14", "action": "eval", "preset": "smoke-20", "engine": "current"},
+              name="m14")
+
+    assert dispatcher.main() == 0
+    doc = status_doc()
+    assert doc["state"] == "done" and doc["error"] is None
+    assert doc["result"]["rc"] == 1
+    assert any("preset finished rc=1" in line for line in doc["log_tail"])
+
+
 def test_a_download_job_runs_through_main(load_tree, calls, monkeypatch):
     make_hf_cli(monkeypatch)
     monkeypatch.setattr(dispatcher, "live_engine", lambda: _serving("cruz"))
