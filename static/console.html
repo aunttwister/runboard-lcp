@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZGX console</title>
+<style>
+  /* Same design tokens as index.html / history.html. One server, one look: the console is a
+     view of the same product, not a separate app. */
+  :root { --bg:#0d1117; --card:#161b22; --line:#30363d; --fg:#e6edf3; --dim:#8b949e;
+          --a:#58a6ff; --b:#3fb950; --c:#d29922; --d:#f85149;
+          /* console-local aliases -> house tokens */
+          --accent:var(--a); --ok:var(--b); --warn:var(--c); --bad:var(--d);
+          --mono:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  header { display:flex; flex-wrap:wrap; gap:12px; align-items:baseline;
+           padding:14px 18px; border-bottom:1px solid var(--line);
+           position:sticky; top:0; background:var(--bg); z-index:5; }
+  header h1 { font-size:15px; margin:0; font-weight:600; }
+  header a { color:var(--a); text-decoration:none; }
+  .badge { padding:2px 8px; border:1px solid var(--line); border-radius:999px; color:var(--dim); }
+  .badge.live { color:var(--b); border-color:var(--b); }
+  .badge.on { color:var(--a); border-color:var(--a); }
+  .badge.warn { color:var(--c); border-color:var(--c); }
+  main { padding:14px 18px 60px; display:grid; gap:14px;
+         grid-template-columns:repeat(auto-fit,minmax(430px,1fr)); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px;
+          padding:12px 14px; min-width:0; overflow-x:auto; }
+  .card.wide { grid-column:1/-1; }
+  .card h2 { font-size:12px; margin:0 0 10px; color:var(--dim); font-weight:600;
+             text-transform:uppercase; letter-spacing:.06em; }
+  .sub { color:var(--dim); font-size:11.5px; margin:-4px 0 10px; }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th,td { text-align:left; padding:4px 6px; border-bottom:1px solid var(--line);
+          white-space:nowrap; }
+  th { color:var(--dim); font-weight:600; position:sticky; top:0; background:var(--card); }
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
+  tr:hover td { background:#1c2128; }
+  select, input, button { font:12px ui-monospace,Menlo,monospace; background:var(--card);
+      color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:4px 8px; }
+  button { cursor:pointer; }
+  button:hover:not(:disabled) { border-color:var(--a); }
+  button:disabled { opacity:.45; cursor:not-allowed; }
+  button.primary { background:var(--a); border-color:var(--a); color:#0d1117; font-weight:600; }
+  button.ghost { background:transparent; }
+  .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; margin-bottom:10px; }
+  .row label { color:var(--dim); font-size:11px; text-transform:uppercase;
+               letter-spacing:.06em; min-width:64px; }
+  .pill { padding:1px 7px; border:1px solid var(--line); border-radius:999px;
+          color:var(--dim); font-size:11px; }
+  .ok { color:var(--b); } .warn { color:var(--c); } .bad { color:var(--d); }
+  .mono { font-family:var(--mono); font-size:12px; }
+  pre { background:#12171e; border:1px solid var(--line); border-radius:6px; padding:10px;
+        max-height:280px; overflow:auto; font-family:var(--mono); font-size:11.5px;
+        white-space:pre-wrap; margin:8px 0 0; color:var(--fg); }
+  .kv { display:grid; grid-template-columns:auto 1fr; gap:2px 12px; font-size:12px; }
+  .kv dt { color:var(--dim); } .kv dd { margin:0; }
+  .tabs { display:flex; gap:6px; margin-bottom:10px; flex-wrap:wrap; }
+  .tab { padding:4px 11px; border:1px solid var(--line); border-radius:6px; background:#12171e;
+         color:var(--dim); cursor:pointer; font:12px ui-monospace,Menlo,monospace; }
+  .tab:hover { color:var(--fg); }
+  .tab.on { color:var(--fg); border-color:var(--a); background:#1c2128; }
+  .hint { color:var(--dim); font-size:11px; margin-top:8px; }
+  .flag { display:inline-block; padding:1px 7px; border-radius:999px;
+          border:1px solid var(--line); color:var(--dim); font-size:11px; }
+  @media (max-width:900px) { main { grid-template-columns:minmax(0,1fr); } }
+</style>
+</head>
+<body>
+<header>
+  <h1>ZGX console</h1>
+  <span class="badge" id="hdr-serving">&hellip;</span>
+  <span class="badge" id="hdr-disk">&hellip;</span>
+  <a href="/" class="badge">live load view →</a>
+  <a href="/history" class="badge">quant history &amp; per-eval-type →</a>
+  <a href="/console" class="badge on">console (this page)</a>
+</header>
+
+<main>
+  <div class="card wide">
+    <h2>Serving on :18300</h2>
+    <div class="sub">Read from the running process, not from a unit file: the loaded engine
+      extension is what decides which build is actually answering.</div>
+    <div class="kv" id="serving"></div>
+    <div class="row" style="margin-top:12px">
+      <label>switch to</label>
+      <select id="serve-target"></select>
+      <button class="ghost" id="serve-btn">Queue switch</button>
+      <span class="hint">goes through the same queue and lock as a run, so it cannot race one.
+        An explicit switch is not undone afterwards.</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Dispatch a test run</h2>
+    <div class="sub">The page only drops a job file. A separate systemd unit under an exclusive
+      flock switches the engine, runs the preset, then restores the baseline engine.</div>
+    <div class="row">
+      <label>preset</label>
+      <select id="preset"></select>
+    </div>
+    <div class="row">
+      <label>engine</label>
+      <select id="engine"></select>
+    </div>
+    <div class="row">
+      <label>token</label>
+      <input id="token" type="password" placeholder="dispatch bearer token" style="flex:1;min-width:180px">
+      <button class="ghost" id="save-token">save</button>
+      <button class="ghost" id="clear-token">forget</button>
+    </div>
+    <div class="row">
+      <button class="primary" id="dispatch-btn">Queue run</button>
+      <span class="hint" id="dispatch-hint"></span>
+    </div>
+    <div id="preset-note" class="hint"></div>
+  </div>
+
+  <div class="card">
+    <h2>Job state</h2>
+    <div class="sub">status.json, written atomically by the dispatcher.</div>
+    <div class="kv" id="jobstate"></div>
+    <pre id="joblog">no job yet</pre>
+  </div>
+
+  <div class="card wide">
+    <h2>Model store</h2>
+    <div class="sub">What this box can serve, with the campaign's own banked rows for each pack.</div>
+    <table id="entries">
+      <thead><tr>
+        <th>id</th><th>engine</th><th>pack</th><th>revision</th><th class="num">size GB</th>
+        <th>state</th><th>kit 140</th><th class="num">decode tok/s</th><th class="num">prefill s</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="card wide">
+    <h2>Find and download</h2>
+    <div class="sub">HuggingFace search needs no token. Size is read per revision before anything
+      is fetched, and a download that would break the free-space floor is refused outright.</div>
+    <div class="row">
+      <input id="hf-q" placeholder="search models, e.g. Qwen3.8-Flash-Next or EXL3" style="flex:1;min-width:240px">
+      <button class="ghost" id="hf-search">Search</button>
+      <span class="hint" id="hf-note"></span>
+    </div>
+    <table id="hf-results">
+      <thead><tr><th>repo</th><th class="num">downloads</th><th class="num">likes</th>
+        <th>created</th><th>tags</th><th></th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div id="hf-plan"></div>
+  </div>
+
+  <div class="card wide">
+    <h2>Dispatch history</h2>
+    <table id="hist">
+      <thead><tr><th>job</th><th>action</th><th>preset</th><th>engine</th><th>state</th>
+        <th>previous</th><th>restored</th><th>finished</th></tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const esc = s => String(s === null || s === undefined ? "" : s)
+  .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+const dash = v => (v === null || v === undefined || v === "") ? "&mdash;" : esc(v);
+const get = (u) => fetch(u).then(r => r.json());
+let TOKEN = localStorage.getItem("zgx_token") || "";
+let MODELS = null;
+
+if (TOKEN) $("token").value = TOKEN;
+
+$("save-token").onclick = () => {
+  TOKEN = $("token").value.trim();
+  localStorage.setItem("zgx_token", TOKEN);
+  $("dispatch-hint").textContent = TOKEN ? "token saved in this browser" : "token cleared";
+};
+$("clear-token").onclick = () => {
+  TOKEN = ""; $("token").value = ""; localStorage.removeItem("zgx_token");
+  $("dispatch-hint").textContent = "token forgotten";
+};
+
+function options(sel, obj, labelFn, valueFn, keep) {
+  const cur = keep ? sel.value : null;
+  sel.innerHTML = Object.keys(obj).map(k =>
+    `<option value="${esc(valueFn ? valueFn(k) : k)}">${esc(labelFn(k, obj[k]))}</option>`).join("");
+  if (cur && Array.from(sel.options).some(o => o.value === cur)) sel.value = cur;
+}
+
+function renderModels(d) {
+  MODELS = d;
+  const s = d.serving || {};
+  $("hdr-serving").innerHTML = "serving: <b>" + dash(s.target) + "</b>";
+  $("hdr-disk").textContent = "free " + dash((d.disk || {}).free_gb) + " GB";
+
+  // The baseline is the engine this box is expected to be serving. A finished eval must
+  // end here, so drift is shown as a flagged row rather than left for the reader to spot.
+  const base = d.baseline || "cruz";
+  const onBase = (s.target === base);
+  $("serving").innerHTML = [
+    ["baseline", onBase
+        ? dash(base) + ' <span class="ok">serving</span>'
+        : dash(base) + ' <span class="bad">OFF BASELINE</span>'],
+    ["engine target", dash(s.target)],
+    ["engine build", dash(s.engine_build)],
+    ["model id", dash(s.model_id)],
+    ["listener pid", dash(s.pid)],
+    ["api healthy", s.healthy ? '<span class="ok">yes</span>' : '<span class="bad">no</span>'],
+    ["token configured", d.dispatch_token_present ? '<span class="ok">yes</span>' : '<span class="bad">no</span>'],
+    ["hf token lifted", d.hf_token_present ? '<span class="ok">yes</span>' : '<span class="warn">no (gated repos will fail)</span>'],
+    ["hf cache", dash((d.disk || {}).hf_cache_gb) + " GB"],
+    ["generated", dash(d.generated_utc)],
+  ].map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("");
+
+  options($("serve-target"), d.engines || {},
+          (k, v) => v.label, k => (k === "current" ? "" : k));
+  Array.from($("serve-target").options).forEach(o => { if (!o.value) o.remove(); });
+
+  options($("engine"), d.engines || {}, (k, v) => v.label, k => k);
+  options($("preset"), d.presets || {},
+          (k, v) => `${v.label} — ${v.rows_hint} rows, ~${v.est_minutes} min`, k => k);
+  presetNote();
+
+  const rows = (d.entries || []).map(e => `<tr>
+      <td>${dash(e.id)}${e.default ? ' <span class="flag">default</span>' : ""}</td>
+      <td>${dash(e.engine)}</td>
+      <td class="mono">${dash(e.pack)}</td>
+      <td class="mono">${dash(e.revision)}</td>
+      <td class="num">${dash(e.size_gb)}</td>
+      <td>${e.active ? '<span class="ok">active</span>' : '<span class="dim">inactive</span>'}
+          ${e.enabled === "disabled" ? ' <span class="flag">disabled at boot</span>' : ""}</td>
+      <td>${dash((e.banked || {}).kit_140)}</td>
+      <td class="num">${dash((e.banked || {}).decode_tok_s)}</td>
+      <td class="num">${dash((e.banked || {}).prefill_s)}</td>
+    </tr>`).join("");
+  $("entries").querySelector("tbody").innerHTML = rows;
+}
+
+function presetNote() {
+  if (!MODELS) return;
+  const p = (MODELS.presets || {})[$("preset").value];
+  $("preset-note").innerHTML = p
+    ? `families: ${esc(p.families)} — runner <span class="mono">${esc(p.runner)}</span> — ${esc(p.note)}`
+    : "";
+}
+$("preset").onchange = presetNote;
+
+function renderJob(d) {
+  const st = d.status || {}, hist = (d.history || {}).jobs || [];
+  const color = st.state === "done" ? "ok" : (st.state === "failed" ? "bad" : "warn");
+  $("jobstate").innerHTML = [
+    ["state", `<span class="${color}">${dash(st.state)}</span>`],
+    ["phase", dash(st.phase)],
+    ["job id", dash((st.job || {}).job_id)],
+    ["preset", dash((st.job || {}).preset)],
+    ["queued", dash(d.queue_depth)],
+    ["elapsed s", dash(st.elapsed_s)],
+    ["percent", dash(st.percent)],
+    ["before", dash((st.previous_engine || {}).target) + " " + dash((st.previous_engine || {}).engine_build)],
+    ["restored to", (st.restored_to ? (st.restored_to.ok ? '<span class="ok">' : '<span class="bad">')
+                       + dash(st.restored_to.target) + "</span>" : "&mdash;")],
+    ["error", st.error ? `<span class="bad">${esc(st.error)}</span>` : "&mdash;"],
+    ["updated", dash(st.updated_utc)],
+  ].map(([k, v]) => `<dt>${esc(k)}</dt><dd>${v}</dd>`).join("");
+  // Say what is actually known. After a job finishes the dispatcher keeps its log, so an
+  // empty log means no live record -- not that no job has ever run (the history table
+  // below is the record of runs).
+  const tail = (st.log_tail || []).join("\n");
+  $("joblog").textContent = tail
+      || (st.finished_utc
+            ? "last job finished " + st.finished_utc + " - log not retained"
+            : "no live job record - see dispatch history below");
+
+  $("hist").querySelector("tbody").innerHTML = hist.slice().reverse().map(j => `<tr>
+      <td class="mono">${dash(j.job_id)}</td>
+      <td>${dash(j.action)}</td>
+      <td>${dash(j.preset || j.repo)}</td>
+      <td>${dash(j.engine)}</td>
+      <td>${j.state === "done" ? '<span class="ok">done</span>'
+            : (j.state === "failed" ? '<span class="bad">failed</span>' : dash(j.state))}</td>
+      <td>${dash((j.previous_engine || {}).target)}</td>
+      <td>${dash((j.restored_to || {}).target)}</td>
+      <td class="mono">${dash(j.finished_utc)}</td>
+    </tr>`).join("") || '<tr><td colspan="8" class="hint">nothing dispatched yet</td></tr>';
+}
+
+async function post(url, body) {
+  const r = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "Authorization": "Bearer " + TOKEN },
+    body: JSON.stringify(body),
+  });
+  let d = {}; try { d = await r.json(); } catch (e) { d = { error: r.status + " " + r.statusText }; }
+  return { status: r.status, body: d };
+}
+
+$("dispatch-btn").onclick = async () => {
+  const payload = { action: "eval", preset: $("preset").value, engine: $("engine").value };
+  $("dispatch-hint").textContent = "queueing…";
+  const r = await post("/api/dispatch", payload);
+  $("dispatch-hint").innerHTML = r.status === 202
+    ? `<span class="ok">queued ${esc(r.body.job_id)}</span>`
+    : `<span class="bad">${r.status}: ${esc(r.body.error || "failed")}</span>`;
+  refresh();
+};
+
+$("serve-btn").onclick = async () => {
+  const target = $("serve-target").value;
+  if (!target) return;
+  const r = await post("/api/dispatch", { action: "serve", engine: target });
+  $("dispatch-hint").innerHTML = r.status === 202
+    ? `<span class="ok">switch queued to ${esc(target)}</span>`
+    : `<span class="bad">${r.status}: ${esc(r.body.error || "failed")}</span>`;
+  refresh();
+};
+
+$("hf-search").onclick = async () => {
+  const q = $("hf-q").value.trim();
+  if (!q) return;
+  $("hf-note").textContent = "searching…";
+  $("hf-plan").innerHTML = "";
+  try {
+    const d = await get("/api/hf/search?q=" + encodeURIComponent(q));
+    $("hf-note").textContent = (d.results || []).length + " results";
+    $("hf-results").querySelector("tbody").innerHTML = (d.results || []).map(m => `<tr>
+        <td class="mono">${dash(m.repo)}</td>
+        <td class="num">${dash(m.downloads)}</td>
+        <td class="num">${dash(m.likes)}</td>
+        <td>${dash(m.created)}</td>
+        <td>${(m.tags || []).map(t => `<span class="flag">${esc(t)}</span>`).join(" ")}</td>
+        <td><button class="ghost" onclick="plan('${esc(m.repo)}')">revisions</button></td>
+      </tr>`).join("") || '<tr><td colspan="6" class="hint">no matches</td></tr>';
+  } catch (e) {
+    $("hf-note").innerHTML = `<span class="bad">search failed: ${esc(e)}</span>`;
+  }
+};
+
+async function plan(repo) {
+  $("hf-plan").innerHTML = `<div class="hint">reading revisions and sizes for ${esc(repo)}…</div>`;
+  try {
+    const d = await get("/api/hf/plan?repo=" + encodeURIComponent(repo));
+    if (d.error) {
+      $("hf-plan").innerHTML = `<div class="bad" style="margin-top:12px">${esc(repo)}: ${esc(d.error)}</div>
+        <div class="hint">A gated repo answers 401 here until terms are accepted; the size cannot be read either.</div>`;
+      return;
+    }
+    const verdict = d.fits ? `<span class="ok">${esc(d.verdict)}</span>`
+                           : `<span class="bad">${esc(d.verdict)}</span>`;
+    const rows = (d.sizes || []).map(s => `<tr>
+        <td class="mono">${dash(s.revision)}</td>
+        <td class="num">${dash(s.gb)}</td>
+        <td class="num">${dash(s.files)}</td>
+        <td>${s.fits ? '<span class="ok">fits</span>' : '<span class="bad">refused</span>'}</td>
+        <td><button class="ghost" onclick="download('${esc(repo)}','${esc(s.revision)}',${s.gb})">download</button></td>
+      </tr>`).join("");
+    $("hf-plan").innerHTML = `
+      <div class="sub" style="margin-top:12px">${esc(repo)} — ${verdict}
+        &nbsp;free ${esc(d.free_gb)} GB, floor ${esc(d.floor_gb)} GB</div>
+      <div class="hint">verdict is for the smallest revision; each row is decided on its own size.</div>
+      <div class="hint">all revisions: ${(d.revisions || []).map(esc).join(", ") || "none listed"}</div>
+      <table><thead><tr><th>revision</th><th class="num">size GB</th><th class="num">files</th>
+        <th>cap &amp; floor</th><th></th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="5" class="hint">no sized revision</td></tr>'}</tbody></table>`;
+  } catch (e) {
+    $("hf-plan").innerHTML = `<div class="bad">plan failed: ${esc(e)}</div>`;
+  }
+}
+
+async function download(repo, revision, gb) {
+  $("dispatch-hint").textContent = "queueing download…";
+  const r = await post("/api/download", { repo: repo, revision: revision, expected_gb: gb });
+  $("dispatch-hint").innerHTML = r.status === 202
+    ? `<span class="ok">download queued: ${esc(r.body.job_id)}</span>`
+    : `<span class="bad">${r.status}: ${esc(r.body.error || "refused")}</span>`;
+  refresh();
+}
+
+let busy = false;
+async function refresh() {
+  if (busy) return;
+  busy = true;
+  try {
+    const [m, j] = await Promise.all([get("/api/models"), get("/api/dispatch")]);
+    renderModels(m);
+    renderJob(j);
+  } catch (e) {
+    $("hdr-serving").textContent = "console api unreachable";
+  } finally {
+    busy = false;
+  }
+}
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

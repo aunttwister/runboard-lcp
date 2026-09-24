@@ -1,0 +1,12 @@
+[Unit]
+Description=ZGX console job dispatcher (executes queued evals, downloads, engine switches)
+Documentation=file:///root/DEPLOY-EXL3-CRUZ-FORK.md
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/load
+ExecStart=/usr/bin/python3 /root/load/dispatcher.py
+# A kit-180 run can take 90 minutes; never let systemd kill a run mid-flight.
+TimeoutStartSec=43200
+Nice=5

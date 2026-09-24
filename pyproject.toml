@@ -1,0 +1,26 @@
+[project]
+name = "runboard-lcp"
+version = "0.1.0"
+description = "ZGX run board: read-only telemetry pages, dispatch console, and the out-of-process dispatcher for the DGX Spark inference box"
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --cov --cov-report=term-missing"
+filterwarnings = ["error::DeprecationWarning"]
+
+[tool.coverage.run]
+source = ["."]
+# Excluded from the 100% target on purpose, with the reason stated in README.md:
+#   load_soak.py is a long-running live-endpoint load harness, not a unit-testable module.
+omit = ["tests/*", "load_soak.py"]
+
+[tool.coverage.report]
+fail_under = 100
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]

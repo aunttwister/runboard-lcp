@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ZGX :18300 — load telemetry</title>
+<style>
+  :root { --bg:#0d1117; --card:#161b22; --line:#30363d; --fg:#e6edf3; --dim:#8b949e;
+          --a:#58a6ff; --b:#3fb950; --c:#d29922; --d:#f85149; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg);
+         font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; }
+  header { display:flex; flex-wrap:wrap; gap:12px; align-items:baseline;
+           padding:14px 18px; border-bottom:1px solid var(--line);
+           position:sticky; top:0; background:var(--bg); z-index:5; }
+  header h1 { font-size:15px; margin:0; font-weight:600; }
+  header a { color:var(--a); text-decoration:none; }
+  .badge { padding:2px 8px; border:1px solid var(--line); border-radius:999px; color:var(--dim); }
+  .badge.live { color:var(--b); border-color:var(--b); }
+  .badge.done { color:var(--a); border-color:var(--a); }
+  .badge.stale { color:var(--c); border-color:var(--c); }
+  main { padding:14px 18px 60px; display:grid; gap:14px;
+         grid-template-columns:repeat(auto-fit,minmax(430px,1fr)); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px 14px;
+          min-width:0; }
+  .card h2 { font-size:12px; margin:0 0 10px; color:var(--dim); font-weight:600;
+             text-transform:uppercase; letter-spacing:.06em; }
+  .kpis { display:flex; flex-wrap:wrap; gap:18px; }
+  .kpi { min-width:0; }
+  .kpi .v { font-size:22px; font-weight:600; }
+  .kpi .l { font-size:11px; color:var(--dim); }
+  canvas { display:block; width:100%; height:150px; }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th,td { text-align:left; padding:4px 6px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th { color:var(--dim); font-weight:600; }
+  .err { color:var(--d); white-space:pre-wrap; }
+  .note { color:var(--dim); font-size:11px; margin-top:8px; }
+  .wide { grid-column:1/-1; }
+</style>
+</head>
+<body>
+<header>
+  <h1>ZGX :18300 — load telemetry</h1>
+<span class="badge">soak data measured on exllamav3 2.50bpw (retired) — :18300 now serves the Cruz fork</span>
+  <span id="phase" class="badge">starting</span>
+  <span id="age" class="badge">—</span>
+  <span id="unit" class="badge">:18300</span>
+  <a href="/history" class="badge">quant history &amp; per-eval-type →</a>
+  <a href="/console" class="badge">console: switch / run / download →</a>
+</header>
+<main>
+  <div class="card">
+    <h2>Throughput</h2>
+    <div class="kpis">
+      <div class="kpi"><div class="v" id="k-agg">—</div><div class="l">aggregate tok/s (60 s rolling)</div></div>
+      <div class="kpi"><div class="v" id="k-stream">—</div><div class="l">per-stream mean tok/s (60 s rolling)</div></div>
+      <div class="kpi"><div class="v" id="k-conc">—</div><div class="l">concurrency</div></div>
+      <div class="kpi"><div class="v" id="k-req">—</div><div class="l">requests (total)</div></div>
+      <div class="kpi"><div class="v" id="k-err">—</div><div class="l">errors (total)</div></div>
+    </div>
+    <canvas id="c-tps"></canvas>
+    <div class="note">Blue: aggregate tok/s. Green: per-stream mean tok/s. One point per completed phase.</div>
+  </div>
+
+  <div class="card">
+    <h2>Machine — power and temperature</h2>
+    <div class="kpis">
+      <div class="kpi"><div class="v" id="k-pow">—</div><div class="l">power W (last sample)</div></div>
+      <div class="kpi"><div class="v" id="k-temp">—</div><div class="l">temp °C (last sample)</div></div>
+      <div class="kpi"><div class="v" id="k-util">—</div><div class="l">GPU util %</div></div>
+      <div class="kpi"><div class="v" id="k-mem">—</div><div class="l">MemAvailable GB</div></div>
+    </div>
+    <canvas id="c-pow"></canvas>
+    <div class="note">2 s cadence on the serve host. On GB10 utilisation is effectively binary, so power is the real load discriminator.</div>
+  </div>
+
+  <div class="card wide">
+    <h2>Phases</h2>
+    <table id="phases">
+      <thead><tr><th>phase</th><th>conc</th><th>min</th><th>reqs</th><th>errors</th>
+      <th>aggregate tok/s</th><th>per-stream mean</th><th>per-stream p50</th><th>scale x</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="note" id="shapes"></div>
+  </div>
+
+  <div class="card wide">
+    <h2>Feed</h2>
+    <div id="feed" class="note">waiting for first state…</div>
+  </div>
+</main>
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+let lastGood = null, staleMark = false;
+
+function fmt(v, d) { return (v === null || v === undefined || Number.isNaN(v)) ? "—" : Number(v).toFixed(d === undefined ? 2 : d); }
+
+// size to the CONTENT box, not the border box: sizing to the border box makes the
+// canvas overflow the card by the padding width (a known silent-blank-chart cause).
+function fit(cv) {
+  const r = cv.getBoundingClientRect();
+  const cs = getComputedStyle(cv);
+  const w = Math.max(80, r.width - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight));
+  const h = Math.max(60, r.height - parseFloat(cs.paddingTop) - parseFloat(cs.paddingBottom));
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  const ctx = cv.getContext("2d");
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { ctx, w, h };
+}
+
+function line(cv, series, colors, labels) {
+  const { ctx, w, h } = fit(cv);
+  ctx.clearRect(0, 0, w, h);
+  const pad = { l: 44, r: 10, t: 10, b: 18 };
+  const iw = w - pad.l - pad.r, ih = h - pad.t - pad.b;
+  const all = series.flat().filter((v) => v !== null && v !== undefined && !Number.isNaN(v));
+  ctx.strokeStyle = "#30363d"; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(pad.l, pad.t + ih); ctx.lineTo(pad.l + iw, pad.t + ih); ctx.stroke();
+  if (!all.length) { ctx.fillStyle = "#8b949e"; ctx.fillText("no samples yet", pad.l + 6, pad.t + ih / 2); return; }
+  let lo = Math.min(...all), hi = Math.max(...all);
+  if (hi - lo < 1e-9) { hi = lo + 1; }
+  const padY = (hi - lo) * 0.08; lo -= padY; hi += padY;
+  const n = Math.max(...series.map((s) => s.length));
+  const X = (i) => pad.l + (n <= 1 ? iw / 2 : (i / (n - 1)) * iw);
+  const Y = (v) => pad.t + ih - ((v - lo) / (hi - lo)) * ih;
+  ctx.fillStyle = "#8b949e"; ctx.font = "10px ui-monospace,monospace";
+  ctx.fillText(hi.toFixed(1), 4, pad.t + 8);
+  ctx.fillText(lo.toFixed(1), 4, pad.t + ih);
+  series.forEach((s, k) => {
+    ctx.strokeStyle = colors[k]; ctx.lineWidth = 1.6; ctx.beginPath();
+    let started = false;
+    s.forEach((v, i) => {
+      if (v === null || v === undefined || Number.isNaN(v)) { started = false; return; }  // gaps, not zeros
+      if (!started) { ctx.moveTo(X(i), Y(v)); started = true; } else { ctx.lineTo(X(i), Y(v)); }
+    });
+    ctx.stroke();
+    if (s.length) { const lv = s[s.length - 1]; if (lv !== null && !Number.isNaN(lv)) {
+      ctx.fillStyle = colors[k]; ctx.beginPath(); ctx.arc(X(s.length - 1), Y(lv), 2.5, 0, 6.30); ctx.fill(); } }
+  });
+  if (labels) { ctx.fillStyle = "#8b949e"; ctx.fillText(labels[0], pad.l, h - 5); }
+}
+
+function render(st) {
+  const phases = st.phases || [];
+  const cur = phases[st.phase_index] || {};
+  const res = cur.result || {};
+  $("phase").textContent = st.phase === "DONE" ? "all phases complete" : ("phase " + (st.phase || "—") + " (" + (st.phase_index + 1) + " of " + phases.length + ")");
+  $("phase").className = "badge " + (st.phase === "DONE" ? "done" : "live");
+  $("unit").textContent = "concurrency " + (cur.c ?? "—");
+  $("k-agg").textContent = fmt(st.live_agg_tps);
+  $("k-stream").textContent = fmt(st.live_stream_tps);
+  $("k-conc").textContent = cur.c ?? "—";
+  $("k-req").textContent = (st.totals || {}).requests ?? "—";
+  $("k-err").textContent = (st.totals || {}).errors ?? "—";
+
+  const s = st.series || {};
+  const p = (a) => (a && a.length ? a[a.length - 1] : null);
+  $("k-pow").textContent = fmt(p(s.gpu_power), 1);
+  $("k-temp").textContent = fmt(p(s.gpu_temp), 1);
+  $("k-util").textContent = fmt(p(s.gpu_util), 0);
+  $("k-mem").textContent = fmt(p(s.mem_avail_gb), 1);
+
+  line($("c-tps"), [s.agg_tps || [], s.stream_tps || []], ["#58a6ff", "#3fb950"]);
+  line($("c-pow"), [s.gpu_power || [], s.gpu_temp || []], ["#d29922", "#f85149"]);
+  // power and temperature share one axis above only for shape; values are real samples
+
+  const tb = $("phases").querySelector("tbody");
+  tb.innerHTML = "";
+  phases.forEach((ph, i) => {
+    const r = ph.result || {};
+    const tr = document.createElement("tr");
+    const cells = [ph.name, ph.c, ph.minutes,
+      r.requests ?? (ph.done ? "0" : "…"), r.errors ?? "…",
+      r.aggregate_tok_s ?? "…", r.per_stream_mean ?? "…", r.per_stream_p50 ?? "…", r.scaling_x ?? "…"];
+    cells.forEach((c, j) => {
+      const td = document.createElement("td");
+      td.textContent = String(c);
+      if (j === 0 && st.phase_index === i && st.phase !== "DONE") td.style.color = "#58a6ff";
+      tr.appendChild(td);
+    });
+    tb.appendChild(tr);
+  });
+
+  const sh = st.shapes || {};
+  $("shapes").textContent = "shapes: " + Object.keys(sh).map((k) => {
+    const v = sh[k];
+    const tps = v.elapsed > 0 ? (v.tokens / v.elapsed).toFixed(1) : "—";
+    return k + " n=" + v.n + " " + tps + " tok/s";
+  }).join("  ·  ");
+
+  const tok = (st.totals || {}).completion_tokens || 0;
+  const el = (st.totals || {}).elapsed || 0;
+  $("feed").textContent =
+    "started " + (st.started_utc || "—") + " · " + (st.totals || {}).requests +
+    " requests · " + tok + " completion tokens · aggregate " +
+    (el > 0 ? (tok / el).toFixed(2) : "—") + " tok/s over the whole run";
+}
+
+async function poll() {
+  try {
+    const r = await fetch("/api/state", { cache: "no-store" });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const st = await r.json();
+    lastGood = st;
+    const age = st.now_age_s;
+    const b = $("age");
+    b.textContent = "state age " + (age === null || age === undefined ? "—" : age + " s");
+    staleMark = (age !== null && age !== undefined && age > 30);
+    b.className = "badge " + (staleMark ? "stale" : "live");
+    render(st);
+  } catch (e) {
+    $("feed").innerHTML = '<span class="err">feed error: ' + String(e) + "</span>" +
+      (lastGood ? " (showing last good state)" : "");
+    if (lastGood) render(lastGood);
+  }
+}
+try { poll(); setInterval(poll, 3000); }
+catch (e) { document.body.insertAdjacentHTML("afterbegin",
+  '<p class="err" style="padding:12px">render boot failed: ' + String(e) + "</p>"); }
+</script>
+</body>
+</html>

@@ -1,0 +1,14 @@
+[Unit]
+Description=Prometheus exporter for the DGX Spark inference box (:9400)
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /root/load/zgx_exporter.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/root/load/exporter.log
+StandardError=append:/root/load/exporter.log
+
+[Install]
+WantedBy=multi-user.target

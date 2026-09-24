@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh the quant results history index every 5 minutes
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+Unit=load-history.service
+
+[Install]
+WantedBy=timers.target

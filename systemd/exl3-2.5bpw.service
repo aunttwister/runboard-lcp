@@ -1,0 +1,31 @@
+[Unit]
+Description=Qwen3.8-Flash-Next EXL3 2.50bpw serving API on :18300 (exllamav3, r0b0tlab GB10 build)
+Documentation=file:///root/DEPLOY-EXL3-2.5bpw.md
+After=network-online.target
+Conflicts=exl3-cruz-fork.service
+
+[Service]
+Type=simple
+WorkingDirectory=/root/exl3-engine/qwen38-flashnext-exl3
+# Serve args are IDENTICAL to the banked 2.50bpw run that measured 64.6 tok/s
+# (moe-cpu-split 0, MTP on, 32768-token cache), so the deployed service is the
+# same configuration that produced the benchmark row. No EXL3_* env knobs here:
+# those belong to the Cruz fork build, and the banked row came from this build.
+Environment=PYTHONUNBUFFERED=1
+Environment=TORCH_CUDA_ARCH_LIST=12.1
+# The box has 121 GB unified; leave headroom for the OS and the :8899 judge.
+MemoryMax=105G
+
+# LAN contract: vLLM bound 0.0.0.0, and consumers on other hosts point at
+# http://192.168.1.107:18300. serve_openai.py defaults --host to 127.0.0.1,
+# so the bind must be explicit here or the endpoint is localhost-only.
+ExecStart=/root/exl3-engine/r0b0tlab-exllamav3/.venv/bin/python /root/exl3-engine/qwen38-flashnext-exl3/scripts/serve_openai.py --target /root/.cache/huggingface/hub/models--r0b0tlab--Qwen3.8-Flash-Next-EXL3-2.50bpw/snapshots/61a1a139ef2411ed6ed5717acfaff288511a1b08 --port 18300 --host 0.0.0.0 --moe-cpu-split 0 --mtp --cache-tokens 32768
+
+Restart=always
+RestartSec=30
+TimeoutStopSec=120
+StandardOutput=append:/root/exl3-2.5bpw.log
+StandardError=append:/root/exl3-2.5bpw.log
+
+[Install]
+WantedBy=multi-user.target

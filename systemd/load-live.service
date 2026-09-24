@@ -1,0 +1,14 @@
+[Unit]
+Description=Live load telemetry + console HTTP page on :18400 (read-only)
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /root/load/live_server.py
+Restart=always
+RestartSec=5
+StandardOutput=append:/root/load/live.log
+StandardError=append:/root/load/live.log
+
+[Install]
+WantedBy=multi-user.target

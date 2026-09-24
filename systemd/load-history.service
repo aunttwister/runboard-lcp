@@ -1,0 +1,9 @@
+[Unit]
+Description=Build the quant results history index (one shot)
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /root/load/history_collector.py
+StandardOutput=append:/root/load/history.log
+StandardError=append:/root/load/history.log

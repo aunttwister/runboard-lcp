@@ -1,0 +1,10 @@
+[Unit]
+Description=Poll the ZGX console dispatch queue
+
+[Timer]
+OnBootSec=90
+OnUnitInactiveSec=15
+AccuracySec=1s
+
+[Install]
+WantedBy=timers.target

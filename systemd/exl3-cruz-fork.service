@@ -1,0 +1,50 @@
+[Unit]
+Description=Qwen3.8-Flash-Next EXL3 serving API on :18300 (exllamav3 CRUZ FORK 523ecd3, turboderp 3.05bpw, GB10)
+Documentation=file:///root/DEPLOY-EXL3-CRUZ-FORK.md
+After=network-online.target
+# Only one engine can hold the port and the memory. Starting this stops the stock-2.50bpw
+# service; switch-model.sh is still the single command that should be used, because it also
+# handles the vLLM container case and health-gates the transition.
+Conflicts=exl3-2.5bpw.service
+# Restart-loop guard. These two live in [Unit], NOT [Service] — systemd-analyze verify
+# rejects them under [Service] and then silently ignores them, which is how you end up
+# with a pack that cannot fit restarting forever.
+StartLimitIntervalSec=300
+StartLimitBurst=3
+
+[Service]
+Type=simple
+WorkingDirectory=/root/exl3-engine/qwen38-flashnext-exl3
+
+# --- this is what makes it the FORK rather than the stock engine -------------------
+# The five EXL3_* knobs are his tuned GB10 environment (run-qwen38-exl3.sh verbatim).
+# Verified live: this venv's exllamav3_ext exports gr_mix_int8 + hc_mix, and the
+# r0b0tlab baseline venv does not. The serve args are byte-identical to the banked
+# cruz-fork-305bpw row (--moe-cpu-split 0 --mtp --cache-tokens 32768), so the service
+# reproduces the measured row rather than a new configuration.
+Environment=PYTHONUNBUFFERED=1
+Environment=TORCH_CUDA_ARCH_LIST=12.1
+Environment=EXL3_INT8_GEMV=0
+Environment=EXL3_MOE_COOP_WIDE=1
+Environment=EXL3_GR_INT8=1
+Environment=EXL3_MTP_HEAD_N=65536
+Environment=EXL3_NGRAM_STREAM=0
+Environment=PATH=/root/exl3-engine/cruz-exllamav3/.venv/bin:/usr/local/cuda-13.0/bin:/usr/local/bin:/usr/bin:/bin
+
+# 121 GB unified; the 3.05bpw pack is larger than the 2.50bpw one, so this ceiling is
+# deliberately tighter against the box than the 2.50bpw unit's 105G.
+MemoryMax=110G
+
+# LAN contract: vLLM bound 0.0.0.0, and consumers on other hosts point at
+# http://192.168.1.107:18300. serve_openai.py defaults --host to 127.0.0.1,
+# so the bind must be explicit here or the endpoint is localhost-only.
+ExecStart=/root/exl3-engine/cruz-exllamav3/.venv/bin/python /root/exl3-engine/qwen38-flashnext-exl3/scripts/serve_openai.py --target /root/.cache/huggingface/hub/models--turboderp--Qwen3.8-Flash-Next-exl3/snapshots/69e33439ae950f17bcbe95c98f117d80f759ab6d --port 18300 --host 0.0.0.0 --moe-cpu-split 0 --mtp --cache-tokens 32768
+
+Restart=always
+RestartSec=30
+TimeoutStopSec=120
+StandardOutput=append:/root/exl3-cruz-fork.log
+StandardError=append:/root/exl3-cruz-fork.log
+
+[Install]
+WantedBy=multi-user.target
