@@ -25,6 +25,26 @@ if str(REPO) not in sys.path:
 
 SANDBOX = pathlib.Path(tempfile.mkdtemp(prefix="runboard-test-"))
 
+# ---------------------------------------------------------------- process/network guard
+#
+# The sandbox redirection above stops a test from reaching a production PATH. It cannot stop
+# a test from spawning a process (`serve.sh`, `systemctl`, `nvidia-smi`) or opening a socket,
+# which is the other half of "hermetic". An audit hook closes that half: the real
+# subprocess/os.exec/socket entry points record a violation, and the autouse guard fails the
+# test that tripped them. Note that a monkeypatched Popen does NOT fire these events -- so an
+# empty list is positive evidence that every process call in this suite was faked.
+HOST_ACTIONS: list[str] = []
+_WATCHED_EVENTS = ("subprocess.Popen", "os.system", "os.exec", "os.posix_spawn",
+                   "os.spawn", "socket.connect")
+
+
+def _audit_host_actions(event: str, args: tuple) -> None:
+    if event in _WATCHED_EVENTS:
+        HOST_ACTIONS.append(event)
+
+
+sys.addaudithook(_audit_host_actions)
+
 
 def _mk(*parts: str) -> pathlib.Path:
     p = SANDBOX.joinpath(*parts)
@@ -86,10 +106,14 @@ def _fresh_sandbox():
 
 @pytest.fixture(autouse=True)
 def _guard_production_paths():
-    """Fail loudly if a test leaves the sandbox."""
+    """Fail loudly if a test leaves the sandbox -- on disk or on the host."""
+    HOST_ACTIONS.clear()
     yield
     import console_core as C
 
+    assert HOST_ACTIONS == [], (
+        "a test reached the host machine: " + ", ".join(HOST_ACTIONS)
+    )
     for attr in ("LOAD", "RUNS_DIR"):
         value = getattr(C, attr, None)
         assert value is not None, f"console_core.{attr} is unset"
