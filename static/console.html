@@ -89,6 +89,31 @@
   .spark polyline { fill:none; stroke:var(--a); stroke-width:1.5; }
   .spark .empty { color:var(--dim); font-size:11px; }
   @media (max-width:900px) { main { grid-template-columns:minmax(0,1fr); } }
+
+  /* Kiosk mode for the 2U wall screen (1280x400), enabled by ?kiosk=1. The display has no
+     input device, so everything clickable is hidden and the live card is the whole page.
+     The honesty labels stay: this view must not look more complete than the full page. */
+  body.kiosk { overflow:hidden; }
+  body.kiosk header { display:none; }
+  body.kiosk main { padding:8px 10px; display:block; }
+  body.kiosk .card { display:none; }
+  body.kiosk .card.live { display:block; border:0; background:transparent; padding:0;
+                          overflow:visible; }
+  body.kiosk .card.live h2 { display:none; }
+  body.kiosk .sub { font-size:12px; margin:0 0 8px; }
+  body.kiosk .wins { display:none; }
+  body.kiosk .chips { gap:10px; }
+  body.kiosk .chip { padding:4px 9px; min-width:0; }
+  body.kiosk .chip .v { font-size:21px; }
+  body.kiosk .chip .k { font-size:10px; }
+  body.kiosk .sparks { gap:14px; margin-top:8px; }
+  /* Fix the block width: the range text is wider than the 296px chart, and four text-width
+     blocks total 1382px, which wraps to a second row on a 1280px screen (measured, not
+     guessed -- the accessibility tree showed nothing wrong). */
+  body.kiosk .spark { width:296px; }
+  body.kiosk .spark svg { width:296px; height:64px; }
+  body.kiosk .spark .r { font-size:10.5px; }
+  body.kiosk .hint { font-size:10.5px; margin-top:5px; }
 </style>
 </head>
 <body>
@@ -102,8 +127,7 @@
 </header>
 
 <main>
-  <div class="card wide">
-    <h2>Live — machine &amp; engine</h2>
+  <div class="card wide live" id="live-card">
     <div class="sub" id="live-sub">reading the exporter on this box…</div>
     <div class="wins" id="live-wins">
       <button class="wbtn on" data-w="30m" type="button">30 min</button>
@@ -203,6 +227,12 @@
 </main>
 
 <script>
+/* The 2U wall screen loads this page as /console?kiosk=1. The class is set before anything
+   renders so the hidden sections never flash on a display nobody can scroll. */
+if (new URLSearchParams(location.search).has("kiosk")) {
+  document.body.classList.add("kiosk");
+  document.title = "ZGX live";
+}
 const $ = id => document.getElementById(id);
 const esc = s => String(s === null || s === undefined ? "" : s)
   .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
