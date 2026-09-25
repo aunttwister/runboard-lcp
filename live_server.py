@@ -25,6 +25,7 @@ from urllib.parse import urlparse, parse_qs
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from corrected_metrics import overlay as _correct   # noqa: E402
 import console_core as C                            # noqa: E402
+import live_metrics as LM                           # noqa: E402
 
 LOAD = Path(os.environ.get("RUNBOARD_LOAD", "/root/load"))
 # Static pages live beside the modules in the deployment and under static/ in a checkout.
@@ -154,6 +155,16 @@ class Handler(BaseHTTPRequestHandler):
             except Exception:
                 self._send(503, "application/json",
                            b'{"error":"models.json not built yet - run registry.py"}')
+
+        elif path.startswith("/api/live"):
+            # Read-only, no token: this is the "grafana panel" surface. Values come from
+            # the local exporter, history from Prometheus; either can be down and the
+            # document says so rather than filling the gap with plausible numbers.
+            try:
+                self._json(LM.live_doc(window=(q.get("window") or [None])[0]))
+            except Exception as exc:
+                self._send(502, "application/json",
+                           json.dumps({"error": f"{type(exc).__name__}: {exc}"}).encode())
 
         elif path.startswith("/api/dispatch"):
             out = {"status": C.read_json(C.STATUS, {"state": "unknown"}),

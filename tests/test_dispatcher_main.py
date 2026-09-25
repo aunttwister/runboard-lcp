@@ -174,8 +174,14 @@ def test_a_failed_restore_flags_the_box_as_off_baseline(load_tree, calls, monkey
     assert any("restore rc=5" in line for line in doc["log_tail"])
 
 
-def test_a_restore_that_raises_is_logged_and_the_job_still_finishes(load_tree, calls,
-                                                                   monkeypatch):
+def test_a_restore_that_raises_is_visible_in_the_fields_the_console_reads(load_tree, calls,
+                                                                          monkeypatch):
+    """A restore that raises must set off_baseline, not just write a log line.
+
+    The failure used to be swallowed into the log tail while ``off_baseline`` stayed null and
+    the job finished ``done`` -- so "the box may be off the baseline" was invisible to
+    everything except a human reading the log. The field the console reads is the signal.
+    """
     seq = [_serving("vllm-prod"), _serving("vllm-prod")]
 
     def flaky():
@@ -188,7 +194,11 @@ def test_a_restore_that_raises_is_logged_and_the_job_still_finishes(load_tree, c
     assert dispatcher.main() == 0
     doc = status_doc()
     assert any("!! restore raised: RuntimeError: no /proc" in line for line in doc["log_tail"])
-    assert doc["state"] == "done"         # pinned as-is: a restore failure is not a job failure
+    assert doc["off_baseline"] is True
+    assert doc["restored_to"] == {"target": "cruz", "rc": None, "ok": False,
+                                  "previous": "vllm-prod", "error": "RuntimeError"}
+    # the job itself still finished: the eval ran, it is the restore that failed
+    assert doc["state"] == "done"
 
 
 def test_baseline_already_serving_needs_no_restore(load_tree, calls, monkeypatch):
@@ -290,14 +300,13 @@ def test_an_explicit_serve_that_does_not_answer_is_a_failed_job(load_tree, calls
     assert "does not answer" in status_doc()["error"]
 
 
-def test_a_runner_that_exits_nonzero_still_finishes_the_job_as_done(load_tree, calls,
-                                                                    monkeypatch):
-    """Pins observed behaviour, NOT a claim that it is right.
+def test_a_runner_that_exits_nonzero_fails_the_job(load_tree, calls, monkeypatch):
+    """A non-zero runner rc means there is no usable measurement, so the job is FAILED.
 
-    ``main()`` only sets ``error`` from an exception; the runner's own exit code is carried
-    inside the result. So a preset run that failed every row finishes as ``state: done`` with
-    ``result.rc == 1``. Reported in MISSION_REPORT.md as an operator decision, not changed here,
-    because the console's "done" may be intended to mean "the job executed".
+    It used to finish as ``state: done`` with the rc hidden inside ``result`` -- so a preset
+    run that failed every row was indistinguishable from a good one on the console, whose
+    history table shows state, not rc. The tick still exits 0: the dispatcher did its own
+    work (it ran the job and restored the baseline); it is the JOB that failed.
     """
     monkeypatch.setattr(dispatcher.subprocess, "Popen",
                         fake_popen(rc=1, lines=("row 1 FAILED",), polls_before_exit=2))
@@ -307,9 +316,25 @@ def test_a_runner_that_exits_nonzero_still_finishes_the_job_as_done(load_tree, c
 
     assert dispatcher.main() == 0
     doc = status_doc()
-    assert doc["state"] == "done" and doc["error"] is None
+    assert doc["state"] == "failed"
+    assert doc["error"] == "runner exited rc=1"
     assert doc["result"]["rc"] == 1
     assert any("preset finished rc=1" in line for line in doc["log_tail"])
+    assert any("FAILED (runner rc=1)" in line for line in doc["log_tail"])
+
+
+def test_a_runner_that_exits_zero_is_still_done(load_tree, calls, monkeypatch):
+    """The other half of the pair: rc=0 must not be reported as a failure."""
+    monkeypatch.setattr(dispatcher.subprocess, "Popen",
+                        fake_popen(rc=0, lines=("row 1 ok",), polls_before_exit=2))
+    monkeypatch.setattr(dispatcher, "live_engine", lambda: _serving("cruz"))
+    queue_job({"job_id": "m14b", "action": "eval", "preset": "smoke-20", "engine": "current"},
+              name="m14b")
+
+    assert dispatcher.main() == 0
+    doc = status_doc()
+    assert doc["state"] == "done" and doc["error"] is None
+    assert doc["result"]["rc"] == 0
 
 
 def test_a_download_job_runs_through_main(load_tree, calls, monkeypatch):

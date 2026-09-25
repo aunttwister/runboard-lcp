@@ -260,7 +260,12 @@ def do_eval(job, st: Status, run_id: str) -> dict:
                    rows_seen=sum(1 for l in log_tail(log, 400) if re.match(r"^\s*\[?\d+", l)))
             if rows:
                 self_last = rows[-1][:160]
-                if not st.logs or st.logs[-1].split("] ", 1)[-1] != self_last:
+                # Status.log stores "[ts]   <line>" (the two-space indent is part of the
+                # stored value), so the de-duplication guard has to compare against the
+                # string that is actually stored. Comparing the bare line made the guard
+                # always true: every 10 s poll of a running job appended the same row
+                # again and the console's log tail filled with duplicates.
+                if not st.logs or st.logs[-1].split("] ", 1)[-1] != "  " + self_last:
                     st.log("  " + self_last)
     rc = proc.returncode
     st.log(f"preset finished rc={rc} after {time.time() - t0:.0f}s")
@@ -512,6 +517,14 @@ def main() -> int:
                 st.set(off_baseline=False)
                 st.log(f"baseline already serving ({C.BASELINE}) - no restore needed")
         except Exception as exc:
+            # A restore that RAISES must still surface in the field the console reads.
+            # A log line alone is not a signal: `off_baseline` stayed null, the job
+            # finished "done", and "the box may be off the baseline" was invisible to
+            # everything except a human reading the log tail.
+            st.set(off_baseline=True,
+                   restored_to={"target": C.BASELINE, "rc": None, "ok": False,
+                                "previous": prev.get("target"),
+                                "error": type(exc).__name__})
             st.log(f"!! restore raised: {type(exc).__name__}: {exc}")
 
 
@@ -526,6 +539,18 @@ def main() -> int:
         finish(job, st, "failed", result=result, error=error)
         st.log(f"job {job.get('job_id')} FAILED")
         return 3
+
+    # A runner that exits non-zero did not produce a usable measurement. Finishing the job
+    # as "done" made a failed eval indistinguishable from a good one on every surface that
+    # reads job state -- the rc lived only inside `result`, which the history table does
+    # not show. The dispatcher itself did its work (it ran the job and restored the
+    # baseline), so the tick still exits 0: the JOB is what failed, not the tick.
+    run_rc = result.get("rc") if isinstance(result, dict) else None
+    if run_rc not in (None, 0):
+        finish(job, st, "failed", result=result, error=f"runner exited rc={run_rc}")
+        st.log(f"job {job.get('job_id')} FAILED (runner rc={run_rc})")
+        return 0
+
     finish(job, st, "done", result=result)
     st.log(f"job {job.get('job_id')} done")
     return 0

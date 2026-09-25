@@ -268,7 +268,13 @@ def hf_revisions(repo: str) -> list[str]:
     names = []
     for key in ("branches", "tags"):
         for item in data.get(key) or []:
-            name = item.get("name") if isinstance(item, dict) else str(item)
+            # A null (or a bare number) in the list is not a revision name. `str(item)`
+            # turned null into the literal revision "None", which then appeared on the
+            # page as a downloadable variant that does not exist.
+            if isinstance(item, dict):
+                name = item.get("name")
+            else:
+                name = item if isinstance(item, str) else None
             if name and name not in names:
                 names.append(name)
     return names

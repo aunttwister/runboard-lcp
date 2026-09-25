@@ -38,14 +38,16 @@ class FakeTime:
 
 
 def fake_popen(rc: int = 0, lines=(), polls_before_exit: int = 1,
-               never_exits: bool = False):
+               never_exits: bool = False, append_each_poll=()):
     """A ``subprocess.Popen`` stand-in.
 
     ``lines`` are written into the log file the caller handed us as ``stdout`` -- that is
     how the dispatcher's progress reader sees a running job. ``polls_before_exit`` controls
     how many times the supervisor loop spins before the process is considered finished;
     ``never_exits`` makes ``poll()`` return None forever, which is what the timeout paths
-    need (the loop must be broken by the deadline, not by the process).
+    need (the loop must be broken by the deadline, not by the process);
+    ``append_each_poll`` adds one more line per poll, so a test can tell a changed tail row
+    (which must be logged) from an unchanged one (which must be suppressed).
     """
     instances = []
 
@@ -57,6 +59,8 @@ def fake_popen(rc: int = 0, lines=(), polls_before_exit: int = 1,
             self.terminated = False
             self.killed = False
             stdout = kwargs.get("stdout")
+            self._stdout = stdout
+            self._extra = list(append_each_poll)
             if stdout is not None and lines:
                 stdout.write("\n".join(lines) + "\n")
                 stdout.flush()
@@ -68,6 +72,9 @@ def fake_popen(rc: int = 0, lines=(), polls_before_exit: int = 1,
 
         def poll(self):
             self._polls += 1
+            if self._extra and self._stdout is not None:
+                self._stdout.write(self._extra.pop(0) + "\n")
+                self._stdout.flush()
             if never_exits:
                 return None
             return None if self._polls < polls_before_exit else rc

@@ -77,10 +77,11 @@ def test_do_switch_raises_when_the_probe_does_not_answer(monkeypatch, st):
 # ---------------------------------------------------------------- do_eval
 
 def _eval_env(monkeypatch, rc=0, lines=("row 1 ok",), polls=2, never_exits=False,
-              time_step=0.0):
+              time_step=0.0, append_each_poll=()):
     monkeypatch.setattr(dispatcher.subprocess, "Popen",
                         fake_popen(rc=rc, lines=lines, polls_before_exit=polls,
-                                   never_exits=never_exits))
+                                   never_exits=never_exits,
+                                   append_each_poll=append_each_poll))
     monkeypatch.setattr(dispatcher, "time", FakeTime(step=time_step))
     monkeypatch.setattr(dispatcher, "live_engine", lambda: {"model_id": "qwen38-flash-next-exl3"})
 
@@ -173,20 +174,28 @@ def test_do_eval_kills_a_run_that_exceeds_its_preset_timeout(monkeypatch, st):
     assert dispatcher.time.slept == 10.0
 
 
-def test_do_eval_relogs_an_unchanged_tail_line_on_every_poll(monkeypatch, st):
-    """Pins observed behaviour, NOT intended behaviour.
+def test_do_eval_logs_an_unchanged_tail_line_only_once(monkeypatch, st):
+    """The de-duplication guard now compares the string that is actually stored.
 
-    The guard on dispatcher.py:263 compares the stored line (``"  " + self_last``, as
-    ``Status.log`` writes it) against ``self_last`` itself, so the two can never be equal and
-    the "already logged this row" suppression never fires: the same tail row is appended every
-    10 s poll. Deliberately left as-is -- making it fire would change what the live console
-    displays, and this mission's rule is that deployed behaviour stays identical. Reported in
-    MISSION_REPORT.md as a latent cosmetic bug with a one-line fix.
+    It used to compare the stored line (``"  " + self_last``, as ``Status.log`` writes it)
+    against ``self_last`` itself, so the two could never be equal and the same tail row was
+    appended on every 10 s poll -- visible on the console as a log tail full of duplicates.
     """
     _eval_env(monkeypatch, lines=("same row forever",), polls=4)
     job = {"job_id": "j7", "action": "eval", "preset": "smoke-20"}
     dispatcher.do_eval(job, st, "j7-current")
-    assert sum(1 for line in st.logs if line.endswith("same row forever")) == 3
+    assert sum(1 for line in st.logs if line.endswith("same row forever")) == 1
+
+
+def test_do_eval_logs_a_new_tail_line_each_time_it_changes(monkeypatch, st):
+    """The negative control for the fix: a row that really changed is still logged.
+
+    Without this, "log it once" could be satisfied by never logging progress at all.
+    """
+    _eval_env(monkeypatch, lines=("row A",), polls=4, append_each_poll=("row B", "row C"))
+    dispatcher.do_eval({"job_id": "j7b", "action": "eval", "preset": "smoke-20"}, st, "j7b-current")
+    logged = [line.rsplit("row ", 1)[-1] for line in st.logs if "row " in line]
+    assert logged == ["B", "C"], "each new tail row must appear exactly once, in order"
 
 
 def test_do_eval_uses_the_fallback_model_when_nothing_is_serving(monkeypatch, st):

@@ -44,12 +44,13 @@ def test_hf_revisions_merges_branches_and_tags_without_duplicates(hf_urlopen):
     assert C.hf_revisions("owner/name") == ["main", "dev", "3.05bpw_h5_ng5"]
 
 
-def test_hf_revisions_stringifies_a_non_string_entry(hf_urlopen):
-    # the live API returns objects; the str() fallback is what a bare string (or a null)
-    # entry would be rendered as. Pinned as-is: observed behaviour, not endorsement.
+def test_hf_revisions_skips_entries_that_are_not_names(hf_urlopen):
+    # A null (or a bare number) in the list is not a revision. It used to be stringified,
+    # so a null became the literal revision "None" -- a variant the page then offered to
+    # download. Skipping it is the only honest reading.
     fake, _ = hf_urlopen
-    fake.payload = {"tags": ["v1", None]}
-    assert C.hf_revisions("owner/name") == ["v1", "None"]
+    fake.payload = {"tags": ["v1", None, 7, {"name": "v2"}, "", {"name": None}]}
+    assert C.hf_revisions("owner/name") == ["v1", "v2"]
 
 
 def test_hf_revisions_handles_absent_keys(hf_urlopen):

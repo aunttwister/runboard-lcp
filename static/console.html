@@ -65,6 +65,29 @@
   .hint { color:var(--dim); font-size:11px; margin-top:8px; }
   .flag { display:inline-block; padding:1px 7px; border-radius:999px;
           border:1px solid var(--line); color:var(--dim); font-size:11px; }
+  /* LIVE card — chips + hand-drawn inline SVG sparklines. No chart library, no CDN:
+     this page is served by a stdlib http.server on a box that must not need the network. */
+  .chips { display:flex; flex-wrap:wrap; gap:8px; }
+  .chip { border:1px solid var(--line); border-radius:8px; padding:6px 10px; min-width:106px;
+          background:#12171e; }
+  .chip .k { display:block; color:var(--dim); font-size:10.5px; text-transform:uppercase;
+             letter-spacing:.06em; }
+  .chip .v { font-variant-numeric:tabular-nums; font-size:16px; }
+  .chip .u { color:var(--dim); font-size:11px; margin-left:3px; }
+  .chip.stale { opacity:.72; }
+  .chip.stale .v { color:var(--dim); }
+  .wins { display:flex; gap:6px; margin:0 0 10px; }
+  .wbtn { background:transparent; color:var(--dim); border:1px solid var(--line);
+          border-radius:6px; padding:3px 10px; font:inherit; font-size:11px; cursor:pointer; }
+  .wbtn:hover { color:var(--fg); border-color:var(--a); }
+  .wbtn.on { color:var(--bg); background:var(--a); border-color:var(--a); }
+  .sparks { display:flex; flex-wrap:wrap; gap:16px; margin-top:12px; }
+  .spark .k { color:var(--dim); font-size:10.5px; text-transform:uppercase;
+              letter-spacing:.06em; }
+  .spark .r { color:var(--dim); font-size:11px; font-variant-numeric:tabular-nums; }
+  .spark svg { display:block; width:180px; height:34px; }
+  .spark polyline { fill:none; stroke:var(--a); stroke-width:1.5; }
+  .spark .empty { color:var(--dim); font-size:11px; }
   @media (max-width:900px) { main { grid-template-columns:minmax(0,1fr); } }
 </style>
 </head>
@@ -79,6 +102,20 @@
 </header>
 
 <main>
+  <div class="card wide">
+    <h2>Live — machine &amp; engine</h2>
+    <div class="sub" id="live-sub">reading the exporter on this box…</div>
+    <div class="wins" id="live-wins">
+      <button class="wbtn on" data-w="30m" type="button">30 min</button>
+      <button class="wbtn" data-w="6h" type="button">6 h</button>
+      <button class="wbtn" data-w="24h" type="button">24 h</button>
+    </div>
+    <div class="chips" id="live-machine"></div>
+    <div class="chips" id="live-run" style="margin-top:8px"></div>
+    <div class="sparks" id="live-sparks"></div>
+    <div class="hint" id="live-gap"></div>
+  </div>
+
   <div class="card wide">
     <h2>Serving on :18300</h2>
     <div class="sub">Read from the running process, not from a unit file: the loaded engine
@@ -379,6 +416,129 @@ async function download(repo, revision, gb) {
     : `<span class="bad">${r.status}: ${esc(r.body.error || "refused")}</span>`;
   refresh();
 }
+
+/* ------------------------------------------------------------------ live stats
+   The grafana panels this replaces, folded into the page: current values from the
+   exporter on THIS box, history from prometheus on the monitoring host. Either source
+   can be down independently and the page names which one is — it never fills a gap
+   with a plausible-looking number. A value that was not sampled renders as a dash. */
+function liveChip(it, stale) {
+  const missing = it.value === null || it.value === undefined;
+  const body = missing ? '<span class="bad">&mdash;</span>'
+                       : esc(it.value) + '<span class="u">' + esc(it.unit || "") + '</span>';
+  return '<div class="chip' + (stale ? " stale" : "") + '">' +
+         '<span class="k">' + esc(it.label) + '</span><span class="v">' + body + '</span></div>';
+}
+
+function sparkSvg(series) {
+  if (!series || !series.length) return "";
+  const vs = series.map(p => p.v);
+  const W = 180, H = 34, n = vs.length;
+  // The <svg> wrapper is load-bearing: a bare <polyline> in an HTML document is an
+  // unknown element that occupies no space and draws no pixels, while still appearing
+  // in the DOM as if the chart were there.
+  const open = '<svg viewBox="0 0 ' + W + ' ' + H + '" width="' + W + '" height="' + H +
+               '" role="img" aria-hidden="true">';
+  if (n === 1) {
+    return open + '<polyline points="0,' + (H - 2) + ' ' + W + ',' + (H - 2) +
+           '" style="stroke:var(--dim)"></polyline></svg>';
+  }
+  const min = Math.min.apply(null, vs), max = Math.max.apply(null, vs);
+  const span = (max - min) || 1;
+  const pts = vs.map((v, i) => {
+    const x = (i / (n - 1)) * W;
+    const y = H - 2 - ((v - min) / span) * (H - 6);
+    return x.toFixed(1) + "," + y.toFixed(1);
+  }).join(" ");
+  return open + '<polyline points="' + pts + '"></polyline></svg>';
+}
+
+const SPARK_KEYS = [["gpu_util", "GPU util %"], ["gpu_power", "GPU power W"],
+                    ["gpu_temp", "GPU temp C"], ["per_stream", "Per-stream tok/s"]];
+
+function renderLive(d) {
+  const bySrc = {};
+  (d.sources || []).forEach(s => { bySrc[s.name] = s; });
+  const exporter = bySrc.exporter || {}, prom = bySrc.prometheus || {};
+  const run = d.run || {};
+
+  $("live-machine").innerHTML = (d.machine || []).length
+    ? d.machine.map(it => liveChip(it, false)).join("")
+    : '<div class="hint">no machine series — the exporter returned nothing</div>';
+
+  // Not live unless a run is actually running: stale numbers are faded and labelled,
+  // never presented as current traffic.
+  const stale = !run.running;
+  $("live-run").innerHTML = (run.items || []).map(it => liveChip(it, stale)).join("");
+
+  const byKey = {};
+  (d.sparks || []).forEach(s => { byKey[s.key] = s.series; });
+  $("live-sparks").innerHTML = SPARK_KEYS.map(function (pair) {
+    const series = byKey[pair[0]];
+    if (!series || !series.length) {
+      return '<div class="spark"><div class="k">' + pair[1] + '</div>' +
+             '<div class="empty">no history</div></div>';
+    }
+    const vs = series.map(p => p.v);
+    // The label states the span the DATA covers, not the window that was asked for. A 24 h
+    // window over a series that only started 11 h ago must not read as "24 h of history".
+    const pts = series.length;
+    const span_s = pts > 1 ? series[pts - 1].t - series[0].t : 0;
+    const covers = span_s >= 5400 ? (span_s / 3600).toFixed(1) + ' h'
+                                  : Math.round(span_s / 60) + ' min';
+    return '<div class="spark"><div class="k">' + pair[1] + '</div>' + sparkSvg(series) +
+      '<div class="r">now ' + esc(vs[vs.length - 1]) + ' &middot; min ' +
+      esc(Math.min.apply(null, vs)) + ' &middot; max ' + esc(Math.max.apply(null, vs)) +
+      ' &middot; ' + pts + ' pts &middot; covers ' + esc(covers) + '</div></div>';
+  }).join("");
+
+  $("live-sub").innerHTML = [
+    exporter.ok ? "exporter ok (" + esc(exporter.detail) + ")"
+                : '<span class="bad">exporter unreachable</span>',
+    prom.ok ? "history ok (" + esc(prom.detail) + ")"
+            : '<span class="warn">no history source</span>',
+    "sparklines " + esc(LIVE_W[d.window] || d.window || "?"),
+    "as of " + esc(d.fetched_utc) + " &middot; refresh 5s",
+  ].join(" &middot; ");
+
+  let gap = "";
+  if (run.note) gap += "<div>" + esc(run.note) + "</div>";
+  if (run.age_label) gap += "<div>last run state written " + esc(run.age_label) + "</div>";
+  if (d.sparks_note) gap += "<div>" + esc(d.sparks_note) + "</div>";
+  if ((d.unavailable || []).length) {
+    gap += "<div>not measurable while the EXL3 engine serves the port (it exposes no " +
+           "/metrics): " + (d.unavailable || []).map(esc).join(", ") + "</div>";
+  }
+  $("live-gap").innerHTML = gap;
+}
+
+/* The window buttons only change what the SPARKLINES look back over. The numbers above them
+   are always current, so a stale window can never make a current value look old. */
+const LIVE_W = { "30m": "30 min", "6h": "6 h", "24h": "24 h" };
+let liveWindow = "30m";
+let liveBusy = false;
+async function refreshLive() {
+  if (liveBusy) return;
+  liveBusy = true;
+  try {
+    renderLive(await get("/api/live?window=" + encodeURIComponent(liveWindow)));
+  } catch (e) {
+    $("live-sub").innerHTML = '<span class="bad">live api unreachable: ' + esc(e) + '</span>';
+  } finally {
+    liveBusy = false;
+  }
+}
+document.querySelectorAll("#live-wins .wbtn").forEach(function (b) {
+  b.addEventListener("click", function () {
+    liveWindow = b.getAttribute("data-w") || "30m";
+    document.querySelectorAll("#live-wins .wbtn").forEach(function (x) {
+      x.classList.toggle("on", x === b);
+    });
+    refreshLive();
+  });
+});
+refreshLive();
+setInterval(refreshLive, 5000);
 
 let busy = false;
 async function refresh() {

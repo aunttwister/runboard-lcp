@@ -12,7 +12,7 @@ SRC="$(cd "$(dirname "$0")/.." && pwd)"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 
 MODULES=(console_core.py registry.py dispatcher.py live_server.py history_collector.py
-         zgx_exporter.py corrected_metrics.py)
+         zgx_exporter.py corrected_metrics.py live_metrics.py)
 PAGES=(index.html history.html console.html)
 
 echo "deploy $SRC -> $HOST:$LOAD (backup $LOAD/backup-$STAMP)"
@@ -34,14 +34,14 @@ done
 
 # syntax gate on the far side BEFORE restarting anything
 echo "compile gate:"
-ssh -o ConnectTimeout=8 "$HOST" "cd '$LOAD' && for f in console_core.py registry.py dispatcher.py live_server.py history_collector.py zgx_exporter.py corrected_metrics.py; do python3 -m py_compile \$f || exit 1; done && echo '  all modules compile'"
+ssh -o ConnectTimeout=8 "$HOST" "cd '$LOAD' && for f in ${MODULES[*]}; do python3 -m py_compile \$f || exit 1; done && echo '  all modules compile'"
 
 ssh -o ConnectTimeout=8 "$HOST" "systemctl restart load-live.service && sleep 2"
 echo "load-live.service: $(ssh -o ConnectTimeout=8 "$HOST" 'systemctl is-active load-live.service')"
 
 # reader smoke: the pages must still answer, and the console's JSON APIs must still parse
 echo "endpoint smoke:"
-for path in / /history /console /api/state /api/history /api/models; do
+for path in / /history /console /api/state /api/history /api/models /api/live; do
   code=$(ssh -o ConnectTimeout=8 "$HOST" "curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18400$path")
   echo "  $path -> $code"
 done
