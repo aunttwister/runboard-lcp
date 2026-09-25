@@ -186,12 +186,37 @@ def _items(spec, plain):
     return out
 
 
-def build_live(now=None, fetch=None, exporter_url=None, sparks=None, window=None):
+def _job_block(status):
+    """The dispatcher's own view of whether a run is active.
+
+    This is load-bearing. The exporter's `zgx_load_*` gauges are written by the SOAK
+    harness only: during an eval preset run they still hold the last soak's final numbers
+    while the GPU sits at 90 %+ and the dispatcher is mid-job. Gating the "is anything
+    running" question on those gauges made the page announce "no load run active" on a box
+    that was demonstrably busy -- caught only by watching a real run, because the tests
+    fake the exporter.
+    """
+    if not isinstance(status, dict):
+        return {"active": False}
+    job = status.get("job") if isinstance(status.get("job"), dict) else {}
+    state = status.get("state")
+    active = state in ("queued", "running")
+    out = {"state": state, "active": active, "job_id": job.get("job_id"),
+           "preset": job.get("preset")}
+    if active:
+        out["phase"] = status.get("phase")
+        out["elapsed_s"] = status.get("elapsed_s")
+    return out
+
+
+def build_live(now=None, fetch=None, exporter_url=None, sparks=None, window=None, job=None):
     """Assemble the /api/live document. Never raises: a dead source degrades the page.
 
     `sparks` lets the caller pass cached series in; when it is None the range queries
     run. Either way a Prometheus failure empties the series and marks the source down,
     while the current values (which come from the local exporter) still render.
+    `job` is the dispatcher's status document, which is what says whether a run is
+    actually in progress (see _job_block).
     """
     fetch = fetch or (lambda u: http_get(u))
     now = time.time() if now is None else now
@@ -200,7 +225,8 @@ def build_live(now=None, fetch=None, exporter_url=None, sparks=None, window=None
            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
            "sources": [], "machine": [], "run": {}, "sparks": [],
            "unavailable": UNAVAILABLE, "age_s": None,
-           "window": wname, "window_s": wsecs, "step_s": wstep}
+           "window": wname, "window_s": wsecs, "step_s": wstep,
+           "job": _job_block(job)}
 
     # ---- source 1: the local exporter (current values)
     plain = {}
@@ -227,10 +253,13 @@ def build_live(now=None, fetch=None, exporter_url=None, sparks=None, window=None
     if age is not None:
         doc["run"]["age_label"] = _age_label(age)
     if not is_running:
-        doc["run"]["note"] = ("no load run active -- these are the last run's final "
-                              "values, not current traffic"
+        # These four gauges belong to the SOAK harness. Saying "no run active" here was
+        # wrong while an eval preset was mid-flight (see _job_block) -- so the wording now
+        # names whose gauges they are, and the job block above carries the real answer.
+        doc["run"]["note"] = ("load-soak gauges: the soak harness writes these and an eval "
+                              "run does not, so they still hold the last soak's final numbers"
                               if age is not None and age > 120 else
-                              "no load run active")
+                              "no load-soak running")
 
     # ---- source 2: Prometheus (history only)
     if sparks is None:
@@ -295,7 +324,7 @@ def cached_sparks(now=None, fetch=None, window=None):
     return sparks or _cache["sparks"].get(wname) or []
 
 
-def live_doc(now=None, fetch=None, window=None):
+def live_doc(now=None, fetch=None, window=None, job=None):
     """What the route calls: local values always, history from the cache."""
-    return build_live(now=now, fetch=fetch, window=window,
+    return build_live(now=now, fetch=fetch, window=window, job=job,
                       sparks=cached_sparks(now=now, fetch=fetch, window=window))

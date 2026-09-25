@@ -111,7 +111,8 @@
       <button class="wbtn" data-w="24h" type="button">24 h</button>
     </div>
     <div class="chips" id="live-machine"></div>
-    <div class="chips" id="live-run" style="margin-top:8px"></div>
+    <div class="hint" id="live-run-label" style="margin:10px 0 4px">load-soak gauges — written by the load soak, not by eval presets</div>
+    <div class="chips" id="live-run"></div>
     <div class="sparks" id="live-sparks"></div>
     <div class="hint" id="live-gap"></div>
   </div>
@@ -492,18 +493,23 @@ function renderLive(d) {
       ' &middot; ' + pts + ' pts &middot; covers ' + esc(covers) + '</div></div>';
   }).join("");
 
+  const job = d.job || {};
   $("live-sub").innerHTML = [
     exporter.ok ? "exporter ok (" + esc(exporter.detail) + ")"
                 : '<span class="bad">exporter unreachable</span>',
     prom.ok ? "history ok (" + esc(prom.detail) + ")"
             : '<span class="warn">no history source</span>',
+    job.active ? '<span class="ok">run active: ' + esc(job.job_id || "?") + " · " +
+                 esc(job.phase || "?") + " · " +
+                 esc(job.elapsed_s == null ? "?" : job.elapsed_s + "s") + "</span>"
+               : "no dispatch run active",
     "sparklines " + esc(LIVE_W[d.window] || d.window || "?"),
     "as of " + esc(d.fetched_utc) + " &middot; refresh 5s",
   ].join(" &middot; ");
 
   let gap = "";
   if (run.note) gap += "<div>" + esc(run.note) + "</div>";
-  if (run.age_label) gap += "<div>last run state written " + esc(run.age_label) + "</div>";
+  if (run.age_label) gap += "<div>last soak state written " + esc(run.age_label) + "</div>";
   if (d.sparks_note) gap += "<div>" + esc(d.sparks_note) + "</div>";
   if ((d.unavailable || []).length) {
     gap += "<div>not measurable while the EXL3 engine serves the port (it exposes no " +

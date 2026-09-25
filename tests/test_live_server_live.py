@@ -73,3 +73,16 @@ def test_live_route_ignores_an_unknown_window(monkeypatch):
     status, _, _ = request(H, "GET", "/api/live?window=all-of-it")
     assert status == 200
     assert seen["window"] == "all-of-it"      # passed through; the module decides the fallback
+
+
+def test_live_route_passes_the_dispatcher_status_so_a_run_is_not_called_idle(monkeypatch):
+    """The exporter cannot say "a preset run is in progress" -- the dispatcher can."""
+    seen = {}
+    monkeypatch.setattr(live_server.LM, "live_doc",
+                        lambda **kw: seen.update(kw) or {"ok": True})
+    monkeypatch.setattr(live_server.C, "read_json",
+                        lambda p, d=None: {"state": "running", "job": {"job_id": "jx"}})
+    status, _, _ = request(H, "GET", "/api/live")
+    assert status == 200
+    assert seen["job"]["state"] == "running"
+    assert seen["job"]["job"]["job_id"] == "jx"

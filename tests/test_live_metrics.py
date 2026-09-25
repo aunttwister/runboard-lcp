@@ -195,7 +195,7 @@ def test_build_live_reports_current_values_and_labels_a_finished_run():
     assert machine["mem_avail"] == 22.5
     assert doc["run"]["running"] == 0
     assert doc["run"]["age_label"] == "9.7 h ago"
-    assert "last run's final values" in doc["run"]["note"]
+    assert "the soak harness writes these" in doc["run"]["note"]
     assert [s["key"] for s in doc["sparks"]] == [k for k, *_ in LM.SPARKS]
     assert "sparks_note" not in doc
 
@@ -212,14 +212,64 @@ def test_build_live_notes_a_recently_finished_run_without_claiming_an_age():
                                  b"zgx_load_state_age_seconds 30")
     doc = LM.build_live(now=10_000, fetch=_fetch(exporter=text))
     assert doc["run"]["age_label"] == "30s ago"
-    assert doc["run"]["note"] == "no load run active"
+    assert doc["run"]["note"] == "no load-soak running"
 
 
 def test_build_live_without_a_state_file_has_no_age_at_all():
     text = b"zgx_serving_up 1\n"
     doc = LM.build_live(now=10_000, fetch=_fetch(exporter=text))
     assert doc["run"]["state_age_s"] is None
-    assert doc["run"]["age_label" if "age_label" in doc["run"] else "note"] == "no load run active"
+    assert doc["run"]["note"] == "no load-soak running"
+
+
+# ----------------------------------------------------- the job block (dispatcher)
+
+def test_job_block_is_inactive_without_a_status_document():
+    assert LM.build_live(now=10_000, fetch=_fetch(), job=None)["job"] == {"active": False}
+
+
+@pytest.mark.parametrize("status", ["nonsense", 7, ["x"], {"state": None}, {}])
+def test_job_block_never_claims_activity_from_a_junk_status(status):
+    doc = LM.build_live(now=10_000, fetch=_fetch(), job=status)
+    assert doc["job"]["active"] is False
+
+
+def test_job_block_reports_an_active_eval_run():
+    """The case the exporter CANNOT answer: a preset run with the soak gauges frozen.
+
+    Observed live on 2026-09-25: GPU at 93 % / 55 W while `zgx_load_running` read 0 and the
+    page announced "no load run active". The dispatcher's status file is the real signal.
+    """
+    status = {"state": "running", "phase": "eval", "elapsed_s": 50.0,
+              "job": {"job_id": "20260925T004052Z-eval-smoke-20", "preset": "smoke-20"}}
+    doc = LM.build_live(now=10_000, fetch=_fetch(), job=status)
+
+    assert doc["job"]["active"] is True
+    assert doc["job"]["job_id"] == "20260925T004052Z-eval-smoke-20"
+    assert doc["job"]["preset"] == "smoke-20"
+    assert doc["job"]["phase"] == "eval" and doc["job"]["elapsed_s"] == 50.0
+    # the soak gauges are still stale, and the note now names whose gauges they are
+    assert doc["run"]["running"] == 0
+    assert "soak" in doc["run"]["note"]
+
+
+def test_job_block_treats_a_queued_job_as_active():
+    doc = LM.build_live(now=10_000, fetch=_fetch(), job={"state": "queued", "job": {}})
+    assert doc["job"]["active"] is True
+
+
+def test_job_block_handles_a_status_without_a_job_dict():
+    doc = LM.build_live(now=10_000, fetch=_fetch(),
+                        job={"state": "running", "job": "not-a-dict"})
+    assert doc["job"]["active"] is True and doc["job"]["job_id"] is None
+
+
+def test_job_block_omits_phase_and_elapsed_when_idle():
+    doc = LM.build_live(now=10_000, fetch=_fetch(),
+                        job={"state": "done", "phase": "eval", "elapsed_s": 280.0,
+                             "job": {"job_id": "old"}})
+    assert doc["job"]["active"] is False
+    assert "phase" not in doc["job"] and "elapsed_s" not in doc["job"]
 
 
 def test_a_dead_exporter_dashes_the_values_but_keeps_history():
