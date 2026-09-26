@@ -33,6 +33,8 @@ import time
 import urllib.parse
 import urllib.request
 
+import run_throughput as RT
+
 # One env var per source so a checkout/test never talks to production by default.
 EXPORTER_URL = os.environ.get("RUNBOARD_EXPORTER_URL", "http://127.0.0.1:9400/metrics")
 PROM_URL = os.environ.get("RUNBOARD_PROM_URL", "http://192.168.1.202:9090")
@@ -209,7 +211,8 @@ def _job_block(status):
     return out
 
 
-def build_live(now=None, fetch=None, exporter_url=None, sparks=None, window=None, job=None):
+def build_live(now=None, fetch=None, exporter_url=None, sparks=None, window=None, job=None,
+               presets=None):
     """Assemble the /api/live document. Never raises: a dead source degrades the page.
 
     `sparks` lets the caller pass cached series in; when it is None the range queries
@@ -217,6 +220,8 @@ def build_live(now=None, fetch=None, exporter_url=None, sparks=None, window=None
     while the current values (which come from the local exporter) still render.
     `job` is the dispatcher's status document, which is what says whether a run is
     actually in progress (see _job_block).
+    `presets` is console_core.PRESETS, passed in rather than imported so the modules stay
+    standalone; it supplies each preset's row count for the throughput block.
     """
     fetch = fetch or (lambda u: http_get(u))
     now = time.time() if now is None else now
@@ -227,6 +232,14 @@ def build_live(now=None, fetch=None, exporter_url=None, sparks=None, window=None
            "unavailable": UNAVAILABLE, "age_s": None,
            "window": wname, "window_s": wsecs, "step_s": wstep,
            "job": _job_block(job)}
+
+    # ---- throughput of the run in progress (see run_throughput): the ONLY place a live
+    # eval run's tok/s exists. Always present, so a consumer never has to guess whether the
+    # absence of the block means "no run" or "not wired up". It consumes doc["job"] -- the
+    # NORMALISED block -- not the raw status document, because the status document keeps
+    # `state` at the top level while the job's own id/preset/engine sit under `job`;
+    # _job_block is the one place that knows that shape.
+    doc["throughput"] = RT.block(doc["job"], presets=presets)
 
     # ---- source 1: the local exporter (current values)
     plain = {}
@@ -324,7 +337,7 @@ def cached_sparks(now=None, fetch=None, window=None):
     return sparks or _cache["sparks"].get(wname) or []
 
 
-def live_doc(now=None, fetch=None, window=None, job=None):
+def live_doc(now=None, fetch=None, window=None, job=None, presets=None):
     """What the route calls: local values always, history from the cache."""
-    return build_live(now=now, fetch=fetch, window=window, job=job,
+    return build_live(now=now, fetch=fetch, window=window, job=job, presets=presets,
                       sparks=cached_sparks(now=now, fetch=fetch, window=window))

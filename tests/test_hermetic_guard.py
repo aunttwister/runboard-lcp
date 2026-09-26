@@ -43,3 +43,26 @@ def test_the_sandbox_is_a_throwaway_directory():
     assert SANDBOX.is_dir()
     assert SANDBOX.name.startswith("runboard-test-")
     assert str(SANDBOX).startswith("/tmp/")
+
+
+def test_no_test_module_defines_the_same_test_name_twice():
+    """A duplicate name silently shadows the first definition -- pytest keeps the LAST.
+
+    That cost real time on 2026-09-26: renaming one test collided with the original at the end
+    of the file, so the stale body kept running and the new assertions never executed. The
+    suite's own integrity is checked rather than assumed.
+    """
+    import ast
+    import pathlib
+
+    here = pathlib.Path(__file__).resolve().parent
+    offenders = {}
+    for path in sorted(here.glob("test_*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        names = [n.name for n in tree.body
+                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                 and n.name.startswith("test_")]
+        dupes = sorted({n for n in names if names.count(n) > 1})
+        if dupes:
+            offenders[path.name] = dupes
+    assert offenders == {}, f"duplicate test names shadow earlier definitions: {offenders}"

@@ -12,7 +12,8 @@ SRC="$(cd "$(dirname "$0")/.." && pwd)"
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
 
 MODULES=(console_core.py registry.py dispatcher.py live_server.py history_collector.py
-         zgx_exporter.py corrected_metrics.py live_metrics.py ui_chrome.py)
+         zgx_exporter.py corrected_metrics.py live_metrics.py ui_chrome.py
+         run_throughput.py)
 PAGES=(index.html history.html console.html)
 
 echo "deploy $SRC -> $HOST:$LOAD (backup $LOAD/backup-$STAMP)"

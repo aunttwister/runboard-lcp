@@ -37,16 +37,16 @@
 </header>
 <main>
   <div class="card">
-    <h2>Throughput</h2>
+    <h2>Throughput <span class="badge" id="tps-src">…</span></h2>
     <div class="kpis">
-      <div class="kpi"><div class="v" id="k-agg">—</div><div class="l">aggregate tok/s (60 s rolling)</div></div>
-      <div class="kpi"><div class="v" id="k-stream">—</div><div class="l">per-stream mean tok/s (60 s rolling)</div></div>
-      <div class="kpi"><div class="v" id="k-conc">—</div><div class="l">concurrency</div></div>
-      <div class="kpi"><div class="v" id="k-req">—</div><div class="l">requests (total)</div></div>
-      <div class="kpi"><div class="v" id="k-err">—</div><div class="l">errors (total)</div></div>
+      <div class="kpi"><div class="v" id="k-agg">—</div><div class="l" id="l-agg">aggregate tok/s (60 s rolling)</div></div>
+      <div class="kpi"><div class="v" id="k-stream">—</div><div class="l" id="l-stream">per-stream mean tok/s (60 s rolling)</div></div>
+      <div class="kpi"><div class="v" id="k-conc">—</div><div class="l" id="l-conc">concurrency</div></div>
+      <div class="kpi"><div class="v" id="k-req">—</div><div class="l" id="l-req">requests (total)</div></div>
+      <div class="kpi"><div class="v" id="k-err">—</div><div class="l" id="l-err">errors (total)</div></div>
     </div>
     <canvas id="c-tps"></canvas>
-    <div class="note">Blue: aggregate tok/s. Green: per-stream mean tok/s. One point per completed phase.</div>
+    <div class="note" id="tps-note">Blue: aggregate tok/s. Green: per-stream mean tok/s. One point per completed phase.</div>
   </div>
 
   <div class="card">
@@ -81,7 +81,7 @@
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
-let lastGood = null, staleMark = false;
+let lastGood = null, lastLive = null, staleMark = false;
 
 function fmt(v, d) { return (v === null || v === undefined || Number.isNaN(v)) ? "—" : Number(v).toFixed(d === undefined ? 2 : d); }
 
@@ -131,18 +131,73 @@ function line(cv, series, colors, labels) {
   if (labels) { ctx.fillStyle = "#8b949e"; ctx.fillText(labels[0], pad.l, h - 5); }
 }
 
-function render(st) {
-  const phases = st.phases || [];
-  const cur = phases[st.phase_index] || {};
-  const res = cur.result || {};
-  $("phase").textContent = st.phase === "DONE" ? "all phases complete" : ("phase " + (st.phase || "—") + " (" + (st.phase_index + 1) + " of " + phases.length + ")");
-  $("phase").className = "badge " + (st.phase === "DONE" ? "done" : "live");
-  $("unit").textContent = "concurrency " + (cur.c ?? "—");
+// The throughput card answers ONE question -- how fast is this box producing tokens -- and it
+// asks whichever component owns the answer. When a job is running that is the job's own
+// rows.jsonl (see /api/live -> throughput, run_throughput.py). When nothing is running it is
+// the soak archive in /api/state. Before this split the card was wired only to the soak, so
+// during an eval run it showed aggregate 0.0, the SOAK's concurrency, and a chart of the five
+// soak phases -- the panel was not broken, it was answering about a different run.
+function renderThroughput(st, live) {
+  const t = (live && live.throughput) || null;
+  const src = $("tps-src");
+  const s = st.series || {};
+
+  if (t && t.active) {
+    src.textContent = "this run";
+    src.className = "badge live";
+    $("l-agg").textContent = "aggregate tok/s (this run, end-to-end)";
+    $("l-stream").textContent = "per-stream mean tok/s (this run)";
+    $("l-conc").textContent = "concurrency";
+    $("l-req").textContent = "rows done" + (t.rows_total ? " (of " + t.rows_total + ")" : "");
+    $("l-err").textContent = "rows errored";
+    $("k-agg").textContent = fmt(t.aggregate_tok_s);
+    $("k-stream").textContent = fmt(t.per_stream_tok_s);
+    $("k-conc").textContent = "1";
+    $("k-req").textContent = (t.rows_done === undefined || t.rows_done === null) ? "—" : String(t.rows_done);
+    $("k-err").textContent = (t.errors === undefined || t.errors === null) ? "—" : String(t.errors);
+    $("unit").textContent = t.preset ? (t.preset + " · 1") : "1";
+    const rs = t.series || {};
+    line($("c-tps"), [rs.agg_tps || [], rs.stream_tps || []], ["#58a6ff", "#3fb950"]);
+    $("tps-note").textContent =
+      "This run: " + (t.job_id || "—") + " · " + (t.tokens_total || 0) +
+      " completion tokens over " + (t.busy_s || 0) + " s of request time. " + (t.note || "") +
+      (t.reason ? " · " + t.reason : "");
+    return;
+  }
+
+  // Nothing is running: the soak archive. Labelled, never left to look live.
+  const cur = (st.phases || [])[st.phase_index] || {};
+  src.textContent = "soak archive";
+  src.className = "badge";
+  $("l-agg").textContent = "aggregate tok/s (60 s rolling)";
+  $("l-stream").textContent = "per-stream mean tok/s (60 s rolling)";
+  $("l-conc").textContent = "concurrency";
+  $("l-req").textContent = "requests (total)";
+  $("l-err").textContent = "errors (total)";
   $("k-agg").textContent = fmt(st.live_agg_tps);
   $("k-stream").textContent = fmt(st.live_stream_tps);
   $("k-conc").textContent = cur.c ?? "—";
   $("k-req").textContent = (st.totals || {}).requests ?? "—";
   $("k-err").textContent = (st.totals || {}).errors ?? "—";
+  $("unit").textContent = "concurrency " + (cur.c ?? "—");
+  line($("c-tps"), [s.agg_tps || [], s.stream_tps || []], ["#58a6ff", "#3fb950"]);
+  $("tps-note").textContent =
+    "Soak archive, measured 2026-09-24: blue aggregate, green per-stream, one point per " +
+    "completed phase. None of it moves while an eval run is going — an eval run's own " +
+    "throughput appears here as soon as one is running." +
+    (t && t.reason ? " (" + t.reason + ")" : "");
+}
+
+function render(st, live) {
+  const phases = st.phases || [];
+  const cur = phases[st.phase_index] || {};
+  const res = cur.result || {};
+  $("phase").textContent = st.phase === "DONE" ? "all phases complete" : ("phase " + (st.phase || "—") + " (" + (st.phase_index + 1) + " of " + phases.length + ")");
+  $("phase").className = "badge " + (st.phase === "DONE" ? "done" : "live");
+  // The throughput card is rendered by renderThroughput: it answers about the RUN IN
+  // PROGRESS when there is one and about the soak archive otherwise. Keeping one writer per
+  // element is why these KPIs are not set here.
+  renderThroughput(st, live);
 
   const s = st.series || {};
   const p = (a) => (a && a.length ? a[a.length - 1] : null);
@@ -151,7 +206,6 @@ function render(st) {
   $("k-util").textContent = fmt(p(s.gpu_util), 0);
   $("k-mem").textContent = fmt(p(s.mem_avail_gb), 1);
 
-  line($("c-tps"), [s.agg_tps || [], s.stream_tps || []], ["#58a6ff", "#3fb950"]);
   line($("c-pow"), [s.gpu_power || [], s.gpu_temp || []], ["#d29922", "#f85149"]);
   // power and temperature share one axis above only for shape; values are real samples
 
@@ -189,20 +243,31 @@ function render(st) {
 
 async function poll() {
   try {
-    const r = await fetch("/api/state", { cache: "no-store" });
-    if (!r.ok) throw new Error("HTTP " + r.status);
-    const st = await r.json();
+    // Two documents, deliberately: /api/state is the soak archive, /api/live is the live
+    // machine + the run in progress. The throughput card needs both to say which question it
+    // is answering. A failure of either must not blank the other.
+    const [rs, rl] = await Promise.allSettled([
+      fetch("/api/state", { cache: "no-store" }),
+      fetch("/api/live?window=30m", { cache: "no-store" }),
+    ]);
+    if (rs.status !== "fulfilled" || !rs.value.ok) {
+      throw new Error("state HTTP " + (rs.status === "fulfilled" ? rs.value.status : "?"));
+    }
+    const st = await rs.value.json();
     lastGood = st;
+    if (rl.status === "fulfilled" && rl.value.ok) {
+      try { lastLive = await rl.value.json(); } catch (e) { /* keep the previous live doc */ }
+    }
     const age = st.now_age_s;
     const b = $("age");
     b.textContent = "state age " + (age === null || age === undefined ? "—" : age + " s");
     staleMark = (age !== null && age !== undefined && age > 30);
     b.className = "badge " + (staleMark ? "stale" : "live");
-    render(st);
+    render(st, lastLive);
   } catch (e) {
     $("feed").innerHTML = '<span class="err">feed error: ' + String(e) + "</span>" +
       (lastGood ? " (showing last good state)" : "");
-    if (lastGood) render(lastGood);
+    if (lastGood) render(lastGood, lastLive);
   }
 }
 try { poll(); setInterval(poll, 3000); }

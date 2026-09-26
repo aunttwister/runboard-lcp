@@ -163,7 +163,8 @@ class Handler(BaseHTTPRequestHandler):
             # document says so rather than filling the gap with plausible numbers.
             try:
                 self._json(LM.live_doc(window=(q.get("window") or [None])[0],
-                                       job=C.read_json(C.STATUS, {})))
+                                       job=C.read_json(C.STATUS, {}),
+                                       presets=C.PRESETS))
             except Exception as exc:
                 self._send(502, "application/json",
                            json.dumps({"error": f"{type(exc).__name__}: {exc}"}).encode())
