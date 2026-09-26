@@ -279,3 +279,78 @@ def test_an_unknown_route_is_404(isolated):
 def test_a_scrape_that_loses_its_client_does_not_raise(isolated):
     status, _, body = request(X.Handler, "GET", "/metrics", fail_write_at=2)
     assert status == 200 and body == b""
+
+
+# ------------------------------------------------------------ dispatch_metrics
+# The flag the operator actually reads. zgx_load_running is written by the soak
+# harness only, so during an eval run it reads 0 while the box is at 96% GPU --
+# these gauges come from the dispatcher's own status file instead.
+
+def _dispatch(run_dir, **over):
+    """The dispatcher's status doc; lives beside run/ under $RUNBOARD_LOAD."""
+    d = run_dir.parent / "dispatch"
+    d.mkdir(parents=True, exist_ok=True)
+    doc = {"state": "idle", "queue_depth": 0, "rows_seen": 0,
+           "job": {"job_id": "20260926T160745Z-eval-smoke-20", "preset": "smoke-20"}}
+    doc.update(over)
+    (d / "status.json").write_text(json.dumps(doc))
+    return doc
+
+
+def test_dispatch_metrics_is_empty_until_the_dispatcher_writes_status(run_dir):
+    assert X.dispatch_metrics() == []
+
+
+def test_dispatch_metrics_reports_a_running_job(run_dir):
+    _dispatch(run_dir, state="running", queue_depth=2, rows_seen=11)
+    text = "\n".join(X.dispatch_metrics())
+    assert "zgx_dispatch_active 1" in text
+    assert "zgx_dispatch_queue_depth 2" in text
+    assert 'zgx_dispatch_state{state="running",preset="smoke-20"} 1' in text
+    assert "zgx_dispatch_state_age_seconds" in text
+
+
+def test_dispatch_metrics_reports_idle_as_not_active(run_dir):
+    _dispatch(run_dir, state="idle")
+    assert "zgx_dispatch_active 0" in "\n".join(X.dispatch_metrics())
+
+
+def test_dispatch_metrics_omits_a_preset_it_does_not_have(run_dir):
+    _dispatch(run_dir, state="queued", job={})
+    text = "\n".join(X.dispatch_metrics())
+    assert 'zgx_dispatch_state{state="queued"} 1' in text
+    assert "preset=" not in text
+
+
+def test_dispatch_metrics_survives_an_unreadable_status_file(run_dir):
+    d = run_dir.parent / "dispatch"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "status.json").write_text("{ this is not json")
+    assert X.dispatch_metrics() == []
+
+
+def test_dispatch_metrics_keeps_the_state_when_the_age_cannot_be_read(monkeypatch):
+    """A status file removed between the read and the stat must not lose the gauges."""
+    class Vanishing:
+        def read_text(self):
+            return json.dumps({"state": "running"})
+
+        def stat(self):
+            raise FileNotFoundError("gone")
+
+    monkeypatch.setattr(X, "DISPATCH", Vanishing())
+    text = "\n".join(X.dispatch_metrics())
+    assert "zgx_dispatch_active 1" in text
+    assert "zgx_dispatch_state_age_seconds" not in text      # omitted, never faked
+
+
+def test_collect_publishes_the_dispatch_gauges_too(monkeypatch, run_dir):
+    monkeypatch.setattr(X, "sample_gpu", lambda: {})
+    monkeypatch.setattr(X, "sample_mem", lambda: {})
+    monkeypatch.setattr(X, "serving_up", lambda: 1)
+    _state(run_dir)
+    _dispatch(run_dir, state="running")
+    text = X.collect()
+    assert "zgx_dispatch_active 1" in text
+    assert "zgx_load_running" in text        # the soak gauge still publishes
+    assert text.endswith("\n")

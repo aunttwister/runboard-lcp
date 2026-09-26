@@ -10,11 +10,14 @@ Two sources, on purpose:
     we do not keep a ring buffer here, because a web process that accumulates state
     is a web process whose bug becomes a data bug.
 
-What this deliberately does NOT do is pretend the vLLM metrics still exist. The EXL3
-engine exposes no ``/metrics`` endpoint at all, so ``vllm:time_to_first_token_*``,
-KV-cache usage, prefix-cache hit rate and spec-decode acceptance have no source while
-EXL3 serves :18300. They are reported as unavailable rather than approximated --
-a panel that invents a plausible TTFT is worse than a panel that says it has none.
+What this deliberately does NOT do is invent a number. ``TTFT (p50/p90)``, KV-cache
+usage, prefix-cache hit rate, spec-decode acceptance and requests-running have no
+mapping in this panel YET, so they are reported as unavailable rather than
+approximated -- a panel that invents a plausible TTFT is worse than one that says it
+has none. Whether the engine on :18300 publishes those metrics at all is probed per
+request (``engine_metrics_note``) instead of hardcoded: the engine there is swappable
+(exllamav3 exposes none, vLLM publishes the whole ``vllm:*`` family), and a fixed
+claim about a swappable component is a claim that rots.
 
 Honesty rules carried over from the exporter and the load harness:
 
@@ -94,6 +97,28 @@ UNAVAILABLE = [
     "spec-decode / MTP acceptance",
     "requests running / waiting",
 ]
+
+ENGINE_METRICS = "http://127.0.0.1:18300/metrics"
+
+
+def engine_metrics_note(fetch):
+    """One truthful sentence about whether :18300 publishes metrics at all.
+
+    This sentence used to be a hardcoded claim -- "the EXL3 engine exposes no /metrics
+    endpoint" -- which was true of the exllamav3 engine and is FALSE of vLLM, which
+    publishes the whole ``vllm:*`` family (TTFT, KV cache, prefix-cache hit rate, MTP
+    acceptance, requests running). A page that states a fixed fact about a swappable
+    component goes stale the moment the component is swapped, so the sentence is now
+    derived from a probe. It cannot claim a source is missing when it is answering.
+    """
+    try:
+        body = fetch(ENGINE_METRICS) or b""
+    except Exception:
+        return "the serving engine on :18300 did not answer /metrics: "
+    if body.strip():
+        return ("the serving engine publishes Prometheus metrics on :18300 that this "
+                "panel does not read yet: ")
+    return "the serving engine on :18300 exposes no /metrics endpoint: "
 
 _LINE = re.compile(r"^(?P<name>[a-zA-Z_:][a-zA-Z0-9_:]*)(?P<labels>\{.*\})?\s+(?P<value>\S+)")
 
@@ -229,7 +254,8 @@ def build_live(now=None, fetch=None, exporter_url=None, sparks=None, window=None
     doc = {"schema": "zgx.console.live.v1", "fetched_utc":
            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
            "sources": [], "machine": [], "run": {}, "sparks": [],
-           "unavailable": UNAVAILABLE, "age_s": None,
+           "unavailable": UNAVAILABLE, "metrics_note": engine_metrics_note(fetch),
+           "age_s": None,
            "window": wname, "window_s": wsecs, "step_s": wstep,
            "job": _job_block(job)}
 

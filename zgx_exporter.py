@@ -35,6 +35,7 @@ from corrected_metrics import overlay as _correct   # noqa: E402
 
 PORT = 9400
 STATE = Path(os.environ.get("RUNBOARD_LOAD", "/root/load")) / "run/state.json"
+DISPATCH = Path(os.environ.get("RUNBOARD_LOAD", "/root/load")) / "dispatch/status.json"
 SERVE_HEALTH = "http://127.0.0.1:18300/v1/models"
 GPU_QUERY = ("power.draw,temperature.gpu,utilization.gpu,clocks.current.graphics,"
              "clocks_throttle_reasons.active")
@@ -169,6 +170,39 @@ def load_metrics():
     return lines
 
 
+def dispatch_metrics():
+    """What the dispatcher itself is doing, from its own status file.
+
+    `zgx_load_running` answers "is the SOAK running" -- it is written by the soak
+    harness, so during an eval run it reads 0 while the box sits at 96% GPU and
+    the state-age gauge grows by the hour. These gauges answer the question an
+    operator actually means: is a job executing on this box right now?
+    """
+    try:
+        st = json.loads(DISPATCH.read_text())
+    except Exception:
+        return []
+    state = st.get("state") or "unknown"
+    job = st.get("job") or {}
+    lines = []
+    lines += gauge("zgx_dispatch_active", 1 if state == "running" else 0,
+                   help_text="1 while the dispatcher is executing a job (eval or soak)")
+    try:
+        age = round(time.time() - DISPATCH.stat().st_mtime, 1)
+    except Exception:
+        age = None
+    lines += gauge("zgx_dispatch_state_age_seconds", age,
+                   help_text="seconds since the dispatcher last wrote its status")
+    lines += gauge("zgx_dispatch_queue_depth", st.get("queue_depth"),
+                   help_text="queued job files not yet picked up")
+    labels = {"state": state}
+    if job.get("preset"):
+        labels["preset"] = str(job["preset"])
+    lines += gauge("zgx_dispatch_state", 1, labels=labels,
+                   help_text="current dispatcher state as a labelled series")
+    return lines
+
+
 def collect():
     lines = []
     gpu = sample_gpu()
@@ -184,6 +218,7 @@ def collect():
     lines += gauge("zgx_serving_up", serving_up(),
                    help_text="1 if the inference endpoint on :18300 answers health")
     lines += load_metrics()
+    lines += dispatch_metrics()
     return "\n".join(lines) + "\n"
 
 

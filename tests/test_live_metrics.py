@@ -441,3 +441,29 @@ def test_live_doc_passes_the_window_to_both_halves(monkeypatch):
     assert LM.live_doc(window="24h") == {"ok": True}
     assert got["window"] == "24h"
     assert got["sparks_kw"]["window"] == "24h"
+
+
+# ---------------------------------------------------------- engine_metrics_note
+# The gap sentence is derived from a probe, never hardcoded: the engine behind :18300
+# is swappable, and the old fixed claim ("the EXL3 engine exposes no /metrics") was
+# false the moment vLLM took the port.
+
+def test_engine_metrics_note_says_the_metrics_exist_when_the_engine_answers():
+    note = LM.engine_metrics_note(lambda url: b"vllm:num_requests_running 1.0\n")
+    assert "publishes Prometheus metrics on :18300" in note
+
+
+def test_engine_metrics_note_says_none_when_the_engine_answers_nothing():
+    assert "exposes no /metrics endpoint" in LM.engine_metrics_note(lambda url: b"")
+
+
+def test_engine_metrics_note_says_it_could_not_ask_when_the_probe_fails():
+    def boom(url):
+        raise OSError("connection refused")
+    assert "did not answer /metrics" in LM.engine_metrics_note(boom)
+
+
+def test_engine_metrics_note_probes_the_engines_own_port():
+    seen = []
+    LM.engine_metrics_note(lambda url: seen.append(url) or b"")
+    assert seen == ["http://127.0.0.1:18300/metrics"]
