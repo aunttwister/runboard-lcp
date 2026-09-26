@@ -169,6 +169,20 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(502, "application/json",
                            json.dumps({"error": f"{type(exc).__name__}: {exc}"}).encode())
 
+        elif path.startswith("/api/token/check"):
+            # "Am I set up to write?", asked BEFORE the operator fills in a form and loses the
+            # work to a 401. Read-only, always 200: it reports what the server makes of the
+            # bearer the caller already holds.
+            #
+            # It adds no oracle the write path does not already have -- POST /api/dispatch
+            # already distinguishes a rejected token (401) from an accepted one (422 on an
+            # unknown preset), so a guesser learns the same thing either way. The auth model is
+            # unchanged: writes still need the exact bearer token, GETs stay open, and an
+            # unconfigured server still fails closed.
+            self._json({"configured": C.console_token() is not None,
+                        "presented": bool(C.bearer(self.headers.get("Authorization"))),
+                        "ok": C.token_ok(self.headers.get("Authorization"))})
+
         elif path.startswith("/api/dispatch"):
             out = {"status": C.read_json(C.STATUS, {"state": "unknown"}),
                    "history": C.read_json(C.HISTORY, {"jobs": []}),

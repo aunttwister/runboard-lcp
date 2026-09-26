@@ -7,6 +7,7 @@ when the file is missing (503, not a stack trace) and when a static page is abse
 from __future__ import annotations
 
 import json
+import pathlib
 import re
 
 import pytest
@@ -17,6 +18,10 @@ import ui_chrome as UC
 from httpkit import request
 
 H = live_server.Handler
+
+# The real page on disk -- for assertions about what the CONSOLE claims, as opposed to what the
+# route serves. Drift between the two is exactly what this file is here to catch.
+CONSOLE_PAGE = pathlib.Path(__file__).resolve().parent.parent / "static" / "console.html"
 
 # A minimal stand-in for a real page: its own content, plus the three markers the server
 # expands into the shared frame (stylesheet, nav + strip, strip script).
@@ -228,3 +233,63 @@ def test_a_write_that_fails_mid_response_is_swallowed():
     # the client going away must not take the server process with it
     status, _, body = request(H, "GET", "/health", fail_write_at=2)
     assert status == 200 and len(body) == 0
+
+
+# ------------------------------------------------- "am I set up to write?" (/api/token/check)
+#
+# The operator met a 401 AFTER filling in the dispatch form, because the only token row on the
+# page came from the SERVER's own file and said yes while his browser held nothing. This route
+# is what makes the browser's own token a checkable fact. It is read-only and always 200.
+
+def test_token_check_on_a_server_with_no_token_says_so():
+    status, _, body = request(H, "GET", "/api/token/check")
+    assert status == 200
+    assert json.loads(body) == {"configured": False, "presented": False, "ok": False}
+
+
+def test_token_check_without_a_header_never_claims_ok():
+    (C.LOAD / "dispatch.token").write_text("s3cret")
+    status, _, body = request(H, "GET", "/api/token/check")
+    assert status == 200
+    assert json.loads(body) == {"configured": True, "presented": False, "ok": False}
+
+
+def test_token_check_rejects_a_wrong_token():
+    (C.LOAD / "dispatch.token").write_text("s3cret")
+    _, _, body = request(H, "GET", "/api/token/check",
+                         headers={"Authorization": "Bearer wrong"})
+    assert json.loads(body) == {"configured": True, "presented": True, "ok": False}
+
+
+@pytest.mark.parametrize("header", ["Bearer s3cret", "s3cret"])
+def test_token_check_accepts_the_configured_token(header):
+    """Both the prefixed and the bare form work, exactly as the write path already allowed."""
+    (C.LOAD / "dispatch.token").write_text("s3cret")
+    _, _, body = request(H, "GET", "/api/token/check", headers={"Authorization": header})
+    assert json.loads(body) == {"configured": True, "presented": True, "ok": True}
+
+
+def test_token_check_is_read_only():
+    """A check must never queue anything -- that is the write path's job, behind the token."""
+    (C.LOAD / "dispatch.token").write_text("s3cret")
+    before = sorted(p.name for p in C.QUEUE.glob("*.json"))
+    request(H, "GET", "/api/token/check", headers={"Authorization": "Bearer s3cret"})
+    assert sorted(p.name for p in C.QUEUE.glob("*.json")) == before
+
+
+def test_the_console_states_the_server_token_and_the_browser_token_separately():
+    """The regression, in the page itself: one row answering two questions.
+
+    `token configured` came from the server's file and read as "you are set up" while the
+    browser held no token. The page must now carry BOTH facts, and ask the server about the
+    one it cannot know on its own.
+    """
+    html = (CONSOLE_PAGE).read_text(encoding="utf-8")
+    assert '["token in this browser"' in html
+    assert '["token on the server"' in html
+    assert '["token configured"' not in html          # the misleading single row is gone
+    assert "/api/token/check" in html                  # ...and the browser's token is checked
+    # ...at LOAD, not only from inside the save/clear handlers. Pinned by indentation, because
+    # a bare "checkToken()" substring is also satisfied by the indented calls in those handlers
+    # -- which is exactly how this assertion was useless the first time it was written.
+    assert any(line == "checkToken();" for line in html.splitlines())

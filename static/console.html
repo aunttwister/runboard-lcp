@@ -222,19 +222,63 @@ const esc = s => String(s === null || s === undefined ? "" : s)
 const dash = v => (v === null || v === undefined || v === "") ? "&mdash;" : esc(v);
 const get = (u) => fetch(u).then(r => r.json());
 let TOKEN = localStorage.getItem("zgx_token") || "";
+let TOKEN_STATE = "unknown";   // what the SERVER says about the token THIS browser holds
 let MODELS = null;
 
 if (TOKEN) $("token").value = TOKEN;
 
+// "Am I set up to write?" -- asked on load and after every save, so a rejected token becomes a
+// labelled state on this page instead of a 401 the operator meets after filling in a form.
+//
+// This page used to show one row, "token configured", taken from the SERVER's own file. That
+// was true and also useless: it said yes while the browser held nothing, and the mismatch only
+// surfaced when Queue returned unauthorized. Two facts, two rows -- the file on the server, and
+// the token in this browser -- because they are different questions.
+const TOKEN_ROW = {
+  none: '<span class="warn">not saved here &mdash; paste one to queue</span>',
+  ok: '<span class="ok">saved here &middot; server accepts it</span>',
+  rejected: '<span class="bad">saved here &middot; server REJECTS it (401)</span>',
+  "server-none": '<span class="bad">saved here &middot; server has none</span>',
+  error: '<span class="warn">saved here &middot; could not check</span>',
+  unknown: "checking&hellip;",
+};
+const TOKEN_HINT = {
+  none: 'no token in this browser &mdash; paste the dispatch token here, then save, to queue runs',
+  ok: 'token saved in this browser &middot; the server accepts it',
+  rejected: 'the token saved here is <span class="bad">rejected by the server (401)</span> &mdash; replace it',
+  "server-none": 'a token is saved here but the server has none &mdash; reads work, writes fail closed (503)',
+  error: 'could not reach the server to check the saved token',
+  unknown: "checking the saved token&hellip;",
+};
+
+async function checkToken() {
+  if (!TOKEN) { TOKEN_STATE = "none"; renderTokenState(); return; }
+  try {
+    const r = await fetch("/api/token/check",
+                          { headers: { "Authorization": "Bearer " + TOKEN } });
+    const d = await r.json();
+    TOKEN_STATE = d.ok ? "ok" : (d.configured ? "rejected" : "server-none");
+  } catch (e) {
+    TOKEN_STATE = "error";
+  }
+  renderTokenState();
+}
+
+function renderTokenState() {
+  $("dispatch-hint").innerHTML = TOKEN_HINT[TOKEN_STATE] || TOKEN_HINT.unknown;
+  if (MODELS) renderModels(MODELS);        // the gate table states the same fact
+}
+
 $("save-token").onclick = () => {
   TOKEN = $("token").value.trim();
   localStorage.setItem("zgx_token", TOKEN);
-  $("dispatch-hint").textContent = TOKEN ? "token saved in this browser" : "token cleared";
+  checkToken();
 };
 $("clear-token").onclick = () => {
   TOKEN = ""; $("token").value = ""; localStorage.removeItem("zgx_token");
-  $("dispatch-hint").textContent = "token forgotten";
+  checkToken();
 };
+checkToken();
 
 function options(sel, obj, labelFn, valueFn, keep) {
   const cur = keep ? sel.value : null;
@@ -262,7 +306,10 @@ function renderModels(d) {
     ["model id", dash(s.model_id)],
     ["listener pid", dash(s.pid)],
     ["api healthy", s.healthy ? '<span class="ok">yes</span>' : '<span class="bad">no</span>'],
-    ["token configured", d.dispatch_token_present ? '<span class="ok">yes</span>' : '<span class="bad">no</span>'],
+    ["token on the server", d.dispatch_token_present
+        ? '<span class="ok">yes</span>'
+        : '<span class="bad">no &mdash; writes fail closed (503)</span>'],
+    ["token in this browser", TOKEN_ROW[TOKEN_STATE] || TOKEN_ROW.unknown],
     ["hf token lifted", d.hf_token_present ? '<span class="ok">yes</span>' : '<span class="warn">no (gated repos will fail)</span>'],
     ["hf cache", dash((d.disk || {}).hf_cache_gb) + " GB"],
     ["generated", dash(d.generated_utc)],
