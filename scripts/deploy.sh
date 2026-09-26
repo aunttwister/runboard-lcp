@@ -40,6 +40,27 @@ ssh -o ConnectTimeout=8 "$HOST" "cd '$LOAD' && for f in ${MODULES[*]}; do python
 ssh -o ConnectTimeout=8 "$HOST" "systemctl restart load-live.service && sleep 2"
 echo "load-live.service: $(ssh -o ConnectTimeout=8 "$HOST" 'systemctl is-active load-live.service')"
 
+# /api/models serves a GENERATED snapshot (models.json), not a live probe -- registry.py
+# writes it. Skip this and the engine panel keeps describing whatever was serving when the
+# file was last built, which is how the console came to show "serving: none" and a false
+# "OFF BASELINE" beside a healthy model. load-models.timer also refreshes it every 5 min;
+# this makes the deploy itself incapable of leaving the panel stale.
+echo "regenerate the model snapshot:"
+ssh -o ConnectTimeout=8 "$HOST" "cd '$LOAD' && /usr/bin/python3 registry.py" | sed 's/^/  /'
+
+# ...and prove the snapshot agrees with the code just deployed. A doc that disagrees with
+# the checkout is exactly the defect this step exists to prevent, so it fails loudly here
+# rather than as a lie on the page.
+want=$(ssh -o ConnectTimeout=8 "$HOST" \
+       "cd '$LOAD' && /usr/bin/python3 -c 'import console_core as C; print(C.BASELINE)'")
+got=$(ssh -o ConnectTimeout=8 "$HOST" "curl -s --max-time 8 http://127.0.0.1:18400/api/models" \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin).get("baseline",""))')
+if [ "$got" != "$want" ]; then
+  echo "  FAIL: /api/models reports baseline='$got', the deployed code says '$want'" >&2
+  exit 1
+fi
+echo "  baseline agrees with the deployed code: $got"
+
 # reader smoke: the pages must still answer, and the console's JSON APIs must still parse
 echo "endpoint smoke:"
 for path in / /history /console /api/state /api/history /api/models /api/live; do

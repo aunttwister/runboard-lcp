@@ -1,0 +1,10 @@
+[Unit]
+Description=Refresh the ZGX console engine/model snapshot (models.json, one shot)
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/root/load
+ExecStart=/usr/bin/python3 /root/load/registry.py
+StandardOutput=append:/root/load/models.log
+StandardError=append:/root/load/models.log

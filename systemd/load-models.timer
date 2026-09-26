@@ -1,0 +1,8 @@
+[Unit]
+Description=Refresh the ZGX console engine/model snapshot every 5 minutes
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+Unit=load-models.service
+[Install]
+WantedBy=timers.target
