@@ -293,3 +293,19 @@ def test_the_console_states_the_server_token_and_the_browser_token_separately():
     # a bare "checkToken()" substring is also satisfied by the indented calls in those handlers
     # -- which is exactly how this assertion was useless the first time it was written.
     assert any(line == "checkToken();" for line in html.splitlines())
+
+
+def test_the_console_explains_a_refused_write_instead_of_only_echoing_it():
+    """The literal complaint: the page answered a failed queue with "401: unauthorized".
+
+    That names the symptom and not the cause, and leaves the reader holding a form that will
+    never work. A refusal must say which token, on which side -- and re-check the one it blames,
+    so the message and the table row cannot disagree.
+    """
+    html = CONSOLE_PAGE.read_text(encoding="utf-8")
+    assert "const WRITE_FAIL = {" in html
+    assert "401: 'the token saved in this browser is wrong or missing" in html
+    assert "503: 'no dispatch token is configured on the server" in html
+    assert html.count("if (r.status === 401 || r.status === 503) checkToken();") == 2, \
+        "both write paths (queue a run, queue a switch) must re-check the token they blame"
+    assert "writeFailed(r)" in html

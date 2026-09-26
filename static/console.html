@@ -397,13 +397,28 @@ async function post(url, body) {
   return { status: r.status, body: d };
 }
 
+// A refused write is where this page used to leave the operator stuck. "401: unauthorized" names
+// the symptom and not the cause, and it is what the complaint in this repo's history quotes --
+// the reader is left holding a form that will never work and no idea which side is wrong. Say
+// which token, on which side, and re-check it so the table row agrees with the message.
+const WRITE_FAIL = {
+  401: 'the token saved in this browser is wrong or missing &mdash; paste the dispatch token, then save',
+  503: 'no dispatch token is configured on the server &mdash; writes fail closed until one is set',
+};
+
+function writeFailed(r) {
+  const extra = WRITE_FAIL[r.status] ? " &mdash; " + WRITE_FAIL[r.status] : "";
+  return `<span class="bad">${r.status}: ${esc(r.body.error || "failed")}</span>${extra}`;
+}
+
 $("dispatch-btn").onclick = async () => {
   const payload = { action: "eval", preset: $("preset").value, engine: $("engine").value };
   $("dispatch-hint").textContent = "queueing…";
   const r = await post("/api/dispatch", payload);
   $("dispatch-hint").innerHTML = r.status === 202
     ? `<span class="ok">queued ${esc(r.body.job_id)}</span>`
-    : `<span class="bad">${r.status}: ${esc(r.body.error || "failed")}</span>`;
+    : writeFailed(r);
+  if (r.status === 401 || r.status === 503) checkToken();
   refresh();
 };
 
@@ -413,7 +428,8 @@ $("serve-btn").onclick = async () => {
   const r = await post("/api/dispatch", { action: "serve", engine: target });
   $("dispatch-hint").innerHTML = r.status === 202
     ? `<span class="ok">switch queued to ${esc(target)}</span>`
-    : `<span class="bad">${r.status}: ${esc(r.body.error || "failed")}</span>`;
+    : writeFailed(r);
+  if (r.status === 401 || r.status === 503) checkToken();
   refresh();
 };
 
