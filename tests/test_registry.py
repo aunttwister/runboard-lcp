@@ -166,6 +166,88 @@ def test_live_engine_reads_the_unit_the_pid_and_the_build(monkeypatch, tmp_path)
     assert info["healthy"] is True and info["model_id"] == "qwen38-flash-next-exl3"
 
 
+def test_live_engine_resolves_the_vllm_engine_that_serves_the_port(monkeypatch):
+    """Regression for the defect: the serving unit has to be IN the catalogue.
+
+    vllm-exl3-cruz.service served :18300 while appearing in no engine list, so
+    live_engine returned target "none" and the console printed "serving: none" beside a
+    healthy model -- and a switch that then failed had no way to restore the engine it
+    had displaced. Resolving the target is what lets the page, the baseline check and
+    serve.sh name what is actually running.
+    """
+    _fake_tools(monkeypatch, active_unit="vllm-exl3-cruz.service")
+    _patch_models(monkeypatch, error=OSError("refused"))
+    info = registry.live_engine()
+    assert info["target"] == "vllm-cruz"
+    assert info["unit"] == "vllm-exl3-cruz.service"
+
+
+def _patch_vllm(monkeypatch, version="0.29.0", version_error=False, models=None):
+    """Fake both probes live_engine makes against the serving port."""
+    import urllib.request
+
+    class R:
+        def __init__(self, body):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self):
+            return self.body
+
+    def fake(req, timeout=None):
+        url = req if isinstance(req, str) else req.full_url
+        if url.endswith("/version"):
+            if version_error:
+                raise OSError("nothing answering on /version")
+            return R(json.dumps({"version": version}).encode())
+        return R(json.dumps(models or {"data": [{"id": "qwen3.8-flash-next"}]}).encode())
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake)
+
+
+def test_live_engine_names_the_vllm_build_from_the_server_and_the_plugin(monkeypatch,
+                                                                        tmp_path):
+    """exllamav3 is named from the .so it loads; vLLM loads none, so ask the server.
+
+    The panel showed a bare "-" for engine build beside a healthy model on the engine the
+    box is meant to be running. The plugin version comes off its .dist-info directory name,
+    never from importing it: importing vllm_exl3 pulls in the exllamav3 kernels and JITs
+    them, which is how this was broken before.
+    """
+    _fake_tools(monkeypatch, active_unit="vllm-exl3-cruz.service")
+    _patch_vllm(monkeypatch, version="0.29.0")
+    site = tmp_path / "site-packages"
+    (site / "vllm_exl3-0.5.0.dist-info").mkdir(parents=True)
+    monkeypatch.setattr(registry, "VLLM_SITE", site)
+
+    info = registry.live_engine()
+    assert info["target"] == "vllm-cruz"
+    assert info["engine_build"] == "vLLM 0.29.0 + vllm_exl3 0.5.0"
+
+
+def test_live_engine_names_a_vllm_build_even_without_the_plugin_on_disk(monkeypatch,
+                                                                       tmp_path):
+    _fake_tools(monkeypatch, active_unit="vllm-exl3-cruz.service")
+    _patch_vllm(monkeypatch, version="0.29.0")
+    monkeypatch.setattr(registry, "VLLM_SITE", tmp_path / "not-installed")
+
+    assert registry.live_engine()["engine_build"] == "vLLM 0.29.0"
+
+
+def test_live_engine_leaves_the_build_unset_when_version_does_not_answer(monkeypatch,
+                                                                        tmp_path):
+    _fake_tools(monkeypatch, active_unit="vllm-exl3-cruz.service")
+    _patch_vllm(monkeypatch, version_error=True)
+    monkeypatch.setattr(registry, "VLLM_SITE", tmp_path)
+
+    assert registry.live_engine()["engine_build"] is None
+
+
 def test_live_engine_falls_back_to_the_docker_container(monkeypatch, tmp_path):
     _fake_tools(monkeypatch, docker="running", ss=SS_LINE)
     _patch_maps(monkeypatch, text="/usr/lib/r0b0tlab-exllamav3_ext.so")
@@ -234,7 +316,7 @@ def test_build_describes_every_catalogue_entry(monkeypatch):
 
     doc = registry.build()
     assert doc["schema"] == "zgx.console.models.v1"
-    assert doc["port"] == registry.PORT and doc["baseline"] == "cruz"
+    assert doc["port"] == registry.PORT and doc["baseline"] == "vllm-cruz"
     assert doc["serving"] == {"target": "cruz"}
     assert doc["generated_utc"].endswith("Z")
     assert doc["hf_token_present"] is True and doc["dispatch_token_present"] is True

@@ -139,7 +139,20 @@ def live_engine() -> dict:
 
 
 def switch_value_for(target: str) -> str | None:
-    return {"cruz": "cruz", "exl3-2.5bpw": "exl3", "vllm-prod": "vllm"}.get(target)
+    """Map a live engine id (registry.live_engine's target) to its serve.sh token.
+
+    Derived from the catalogue instead of a second hardcoded list. When this was a
+    literal dict it was one of three separate lists naming the engines, and the vLLM
+    engine actually serving :18300 was in none of them -- so "what is serving" read
+    "none" in the console, in serve.sh and here, and a failed switch could not
+    restore the engine it had displaced.
+    """
+    import registry
+
+    for entry in registry.CATALOGUE:
+        if entry["id"] == target:
+            return entry.get("switch")
+    return None
 
 
 def busy_with_something_else() -> str | None:

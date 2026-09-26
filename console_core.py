@@ -87,7 +87,8 @@ PRESETS: dict[str, dict] = {
 # What a run may be pointed at.
 ENGINES: dict[str, dict] = {
     "current": {"label": "whatever is serving now (no switch)", "switch": None},
-    "cruz": {"label": "Cruz fork + 3.05bpw", "switch": "cruz"},
+    "vllm-cruz": {"label": "vLLM + vllm-exl3 fork + 3.05bpw", "switch": "vllm-cruz"},
+    "cruz": {"label": "Cruz fork + 3.05bpw (exllamav3)", "switch": "cruz"},
     "exl3": {"label": "stock exllamav3 + 2.50bpw", "switch": "exl3"},
     "vllm": {"label": "vLLM prod (NVFP4 + abliterated)", "switch": "vllm"},
 }
@@ -96,7 +97,13 @@ ENGINES: dict[str, dict] = {
 # Every eval restores it afterwards, whatever engine the eval ran on, so the box
 # cannot be left on a test engine by a finished job. Anything that ends up serving
 # something else is reported as off-baseline rather than passing quietly.
-BASELINE = "cruz"
+#
+# This was "cruz" (the exllamav3 fork). The admin chose vLLM + vllm-exl3 on the
+# 3.05bpw pack as the configuration to keep live, so the baseline is that engine and
+# the exllamav3 fork becomes a switchable alternative -- otherwise every run would
+# "restore" a 10-minute engine load back onto the exllamav3 build the box is not
+# meant to be running.
+BASELINE = "vllm-cruz"
 
 # Leave this much free after a download. The pack we run is 85 GB; an abliterated
 # NVFP4 pack is ~800 GB. A button that can fill the disk is not a feature.

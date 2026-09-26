@@ -125,18 +125,19 @@ def test_an_eval_switches_runs_and_restores_the_baseline(load_tree, calls, monke
     doc = status_doc()
     assert doc["state"] == "done" and doc["phase"] == "done"
     assert doc["previous_engine"] == {"target": "vllm-prod", "engine_build": "vLLM"}
-    assert doc["restored_to"] == {"target": "cruz", "rc": 0, "ok": True,
+    assert doc["restored_to"] == {"target": C.BASELINE, "rc": 0, "ok": True,
                                   "previous": "vllm-prod"}
     assert doc["off_baseline"] is False
     assert doc["result"]["run_id"] == "m1-exl3"
     # switched out to the job's engine, then back to the baseline
-    assert _serve_calls(calls, "exl3") and _serve_calls(calls, "cruz")
+    assert _serve_calls(calls, "exl3") and _serve_calls(calls, C.BASELINE)
     assert calls.index(["systemctl", "start", "load-history.service"]) >= 0
     assert not (C.QUEUE / "m1.json").exists() and (C.DONE / "m1.json").exists()
     joined = " ".join(doc["log_tail"])
     assert "picked job m1 (eval)" in joined and "validated: ok" in joined
     assert "before: serving=vllm-prod" in joined
-    assert "restoring baseline: cruz" in joined and "restored to baseline cruz" in joined
+    assert f"restoring baseline: {C.BASELINE}" in joined
+    assert f"restored to baseline {C.BASELINE}" in joined
     assert "job m1 done" in joined
 
 
@@ -154,15 +155,15 @@ def test_a_run_that_raises_still_restores_the_baseline(load_tree, calls, monkeyp
     assert dispatcher.main() == 3
     doc = status_doc()
     assert doc["state"] == "failed" and doc["error"] == "RuntimeError: runner exploded"
-    assert doc["restored_to"]["target"] == "cruz" and doc["off_baseline"] is False
-    assert _serve_calls(calls, "cruz")    # the box is put back even after a crash
+    assert doc["restored_to"]["target"] == C.BASELINE and doc["off_baseline"] is False
+    assert _serve_calls(calls, C.BASELINE)   # the box is put back even after a crash
     assert any("ERROR: RuntimeError: runner exploded" in line for line in doc["log_tail"])
 
 
 def test_a_failed_restore_flags_the_box_as_off_baseline(load_tree, calls, monkeypatch):
     """A restore that returns non-zero must not be reported as if the box came back."""
     monkeypatch.setattr(dispatcher, "run",
-                        _run({"cruz": (5, "", "serve.sh: no such engine")}))
+                        _run({C.BASELINE: (5, "", "serve.sh: no such engine")}))
     monkeypatch.setattr(dispatcher, "live_engine", lambda: _serving("vllm-prod"))
     queue_job({"job_id": "m3", "action": "eval", "preset": "smoke-20", "engine": "current"},
               name="m3")
@@ -195,22 +196,23 @@ def test_a_restore_that_raises_is_visible_in_the_fields_the_console_reads(load_t
     doc = status_doc()
     assert any("!! restore raised: RuntimeError: no /proc" in line for line in doc["log_tail"])
     assert doc["off_baseline"] is True
-    assert doc["restored_to"] == {"target": "cruz", "rc": None, "ok": False,
+    assert doc["restored_to"] == {"target": C.BASELINE, "rc": None, "ok": False,
                                   "previous": "vllm-prod", "error": "RuntimeError"}
     # the job itself still finished: the eval ran, it is the restore that failed
     assert doc["state"] == "done"
 
 
 def test_baseline_already_serving_needs_no_restore(load_tree, calls, monkeypatch):
-    monkeypatch.setattr(dispatcher, "live_engine", lambda: _serving("cruz", "CRUZ FORK"))
+    monkeypatch.setattr(dispatcher, "live_engine", lambda: _serving(C.BASELINE, "CRUZ FORK"))
     queue_job({"job_id": "m5", "action": "eval", "preset": "smoke-20", "engine": "current"},
               name="m5")
 
     assert dispatcher.main() == 0
-    assert _serve_calls(calls, "cruz") == []
+    assert _serve_calls(calls, C.BASELINE) == []
     doc = status_doc()
     assert doc["off_baseline"] is False
-    assert any("baseline already serving (cruz)" in line for line in doc["log_tail"])
+    assert any(f"baseline already serving ({C.BASELINE})" in line
+               for line in doc["log_tail"])
 
 
 def test_a_failing_history_refresh_does_not_fail_a_good_job(load_tree, calls, monkeypatch):
@@ -269,13 +271,13 @@ def test_an_explicit_serve_is_left_in_place_and_the_drift_is_recorded(load_tree,
 
 def test_an_explicit_serve_that_lands_on_the_baseline_is_not_flagged(load_tree, calls,
                                                                     monkeypatch):
-    monkeypatch.setattr(dispatcher, "live_engine", lambda: _serving("cruz", "CRUZ FORK"))
-    queue_job({"job_id": "m10", "action": "serve", "engine": "cruz"}, name="m10")
+    monkeypatch.setattr(dispatcher, "live_engine", lambda: _serving(C.BASELINE, "CRUZ FORK"))
+    queue_job({"job_id": "m10", "action": "serve", "engine": "vllm-cruz"}, name="m10")
 
     assert dispatcher.main() == 0
     doc = status_doc()
     assert doc["off_baseline"] is False
-    assert any("it is the baseline (cruz)" in line for line in doc["log_tail"])
+    assert any(f"it is the baseline ({C.BASELINE})" in line for line in doc["log_tail"])
 
 
 def test_a_failed_explicit_serve_is_a_failed_job(load_tree, monkeypatch):

@@ -22,6 +22,11 @@ import console_core as C
 # Where the model packs actually live. Overridable so a checkout can point at a tmp tree.
 HF_CACHE = Path(os.environ.get("RUNBOARD_HF_CACHE", "/root/.cache/huggingface/hub"))
 
+# Where the vLLM venv keeps its distributions. Used only to read a version off a
+# directory name -- see _dist_version for why this must never import the plugin.
+VLLM_SITE = Path(os.environ.get("RUNBOARD_VLLM_SITE",
+                                "/root/venvs/vllm-exl3/lib/python3.12/site-packages"))
+
 CATALOGUE = [
     {
         "id": "cruz",
@@ -38,6 +43,29 @@ CATALOGUE = [
         "model_id": "qwen38-flash-next-exl3",
         "banked": {"kit_140": "138/140 (98.6%)", "kit_140_auto": "118/120 (98.3%)",
                    "decode_tok_s": 51.10, "prefill_s": 0.831, "e2e_tok_s": 56.44},
+        "default": False,
+    },
+    {
+        "id": "vllm-cruz",
+        "label": "vLLM + vllm-exl3 fork + 3.05bpw",
+        "base_model": "Qwen3.8-Flash-Next",
+        "engine": "vLLM + vllm-exl3 fork",
+        "pack": "turboderp/Qwen3.8-Flash-Next-exl3",
+        "revision": "3.05bpw_h5_ng5",
+        "path": str(HF_CACHE / "models--turboderp--Qwen3.8-Flash-Next-exl3"
+                    / "snapshots/69e33439ae950f17bcbe95c98f117d80f759ab6d"),
+        "kind": "unit",
+        "unit": "vllm-exl3-cruz.service",
+        "switch": "vllm-cruz",
+        "model_id": "qwen3.8-flash-next",
+        # Same pack as the cruz entry above, served by a DIFFERENT engine: vLLM with the
+        # vllm-exl3 plugin instead of exllamav3. It was serving :18300 through the whole
+        # 2026-09-26 console work while every engine list in the toolchain -- this
+        # catalogue, console_core.ENGINES and serve.sh -- still named only the three
+        # exllamav3/container engines, so all of them reported "none" and the page
+        # showed a false "OFF BASELINE". Rows are measured, never assumed: kit_140 is
+        # absent because this engine has not run the frozen kit (smoke-20 graded 14/14).
+        "banked": {"decode_tok_s": 55.0, "e2e_tok_s": 47.78},
         "default": True,
     },
     {
@@ -114,6 +142,43 @@ def _dir_gb(path: str) -> float | None:
         return None
 
 
+def _dist_version(name: str) -> str | None:
+    """Installed version of a distribution, read from its ``.dist-info`` directory name.
+
+    Deliberately NOT ``import vllm_exl3``: importing the plugin pulls in the exllamav3
+    kernels and JITs them for the host CPU, which is how this was broken before. The
+    version is a directory name; read the directory.
+    """
+    for d in VLLM_SITE.glob(f"{name}-*.dist-info"):
+        # "vllm_exl3-0.5.0.dist-info" -> strip the suffix, take the LAST dash field. The
+        # naive split on "-" yields "0.5.0.dist" and the panel would print that verbatim.
+        stem = d.name[: -len(".dist-info")]
+        parts = stem.rsplit("-", 1)
+        if len(parts) == 2:
+            return parts[1]
+    return None
+
+
+def _vllm_build() -> str | None:
+    """Name the vLLM build that is answering, for engines that are a python package.
+
+    exllamav3 identifies itself through the extension ``.so`` loaded into the process, so
+    the /proc maps probe above can name it. vLLM loads no such ``.so``, so that probe
+    returned nothing and the panel showed a bare "-" beside a healthy model -- the same
+    "the view does not say what is happening" gap as the rest of this page. Ask the server
+    what it is instead. Returns None when nothing answers, so "-" stays honest rather than
+    turning into a guess.
+    """
+    try:
+        import urllib.request
+        with urllib.request.urlopen(f"http://127.0.0.1:{PORT}/version", timeout=6) as r:
+            label = "vLLM " + json.load(r)["version"]
+    except Exception:
+        return None
+    plugin = _dist_version("vllm_exl3")
+    return f"{label} + vllm_exl3 {plugin}" if plugin else label
+
+
 def live_engine() -> dict:
     """Which engine is loaded, from the running process — not from a unit file.
     The venv python is a symlink chain to /usr/bin/python3, so /proc/<pid>/exe
@@ -161,6 +226,11 @@ def live_engine() -> dict:
             info["model_id"] = json.load(r)["data"][0]["id"]
     except Exception:
         pass
+    if info["engine_build"] is None and info["healthy"]:
+        # Something is answering the OpenAI API and no exllamav3 extension is loaded into
+        # it, so ask the server to name itself. Gated on healthy so we never probe a dark
+        # port, and "None" stays available for "nothing to say".
+        info["engine_build"] = _vllm_build()
     return info
 
 
