@@ -3,22 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>ZGX :18300 — load telemetry</title>
+<title>ZGX · load telemetry</title>
+<!--ZgX:chrome-head-->
 <style>
-  :root { --bg:#0d1117; --card:#161b22; --line:#30363d; --fg:#e6edf3; --dim:#8b949e;
-          --a:#58a6ff; --b:#3fb950; --c:#d29922; --d:#f85149; }
-  * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--fg);
-         font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; }
-  header { display:flex; flex-wrap:wrap; gap:12px; align-items:baseline;
-           padding:14px 18px; border-bottom:1px solid var(--line);
-           position:sticky; top:0; background:var(--bg); z-index:5; }
-  header h1 { font-size:15px; margin:0; font-weight:600; }
-  header a { color:var(--a); text-decoration:none; }
-  .badge { padding:2px 8px; border:1px solid var(--line); border-radius:999px; color:var(--dim); }
-  .badge.live { color:var(--b); border-color:var(--b); }
-  .badge.done { color:var(--a); border-color:var(--a); }
-  .badge.stale { color:var(--c); border-color:var(--c); }
+  /* Page-specific rules only. The frame -- design tokens, header, badges, view tabs and the
+     status strip -- is injected from ui_chrome.py so all three pages render one nav. */
   main { padding:14px 18px 60px; display:grid; gap:14px;
          grid-template-columns:repeat(auto-fit,minmax(430px,1fr)); }
   .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px 14px;
@@ -40,13 +29,11 @@
 </head>
 <body>
 <header>
-  <h1>ZGX :18300 — load telemetry</h1>
-<span class="badge">soak data measured on exllamav3 2.50bpw (retired) — :18300 now serves the Cruz fork</span>
+<!--ZgX:chrome-->
+  <span class="badge">soak run recorded on exllamav3 2.50bpw (retired) — :18300 now serves the Cruz fork</span>
   <span id="phase" class="badge">starting</span>
   <span id="age" class="badge">—</span>
   <span id="unit" class="badge">:18300</span>
-  <a href="/history" class="badge">quant history &amp; per-eval-type →</a>
-  <a href="/console" class="badge">console: switch / run / download →</a>
 </header>
 <main>
   <div class="card">
@@ -65,13 +52,15 @@
   <div class="card">
     <h2>Machine — power and temperature</h2>
     <div class="kpis">
-      <div class="kpi"><div class="v" id="k-pow">—</div><div class="l">power W (last sample)</div></div>
-      <div class="kpi"><div class="v" id="k-temp">—</div><div class="l">temp °C (last sample)</div></div>
-      <div class="kpi"><div class="v" id="k-util">—</div><div class="l">GPU util %</div></div>
-      <div class="kpi"><div class="v" id="k-mem">—</div><div class="l">MemAvailable GB</div></div>
+      <div class="kpi"><div class="v" id="k-pow">—</div><div class="l">power W (soak sample)</div></div>
+      <div class="kpi"><div class="v" id="k-temp">—</div><div class="l">temp °C (soak sample)</div></div>
+      <div class="kpi"><div class="v" id="k-util">—</div><div class="l">GPU util % (soak sample)</div></div>
+      <div class="kpi"><div class="v" id="k-mem">—</div><div class="l">MemAvailable GB (soak sample)</div></div>
     </div>
     <canvas id="c-pow"></canvas>
     <div class="note">2 s cadence on the serve host. On GB10 utilisation is effectively binary, so power is the real load discriminator.</div>
+    <div class="note">Recorded by the <em>soak</em> run, not sampled now — these are the soak's last written samples. Live
+      machine values are in the strip at the top of this page on every view.</div>
   </div>
 
   <div class="card wide">
@@ -220,5 +209,6 @@ try { poll(); setInterval(poll, 3000); }
 catch (e) { document.body.insertAdjacentHTML("afterbegin",
   '<p class="err" style="padding:12px">render boot failed: ' + String(e) + "</p>"); }
 </script>
+<!--ZgX:chrome-js-->
 </body>
 </html>

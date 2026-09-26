@@ -7,14 +7,22 @@ when the file is missing (503, not a stack trace) and when a static page is abse
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
 import console_core as C
 import live_server
+import ui_chrome as UC
 from httpkit import request
 
 H = live_server.Handler
+
+# A minimal stand-in for a real page: its own content, plus the three markers the server
+# expands into the shared frame (stylesheet, nav + strip, strip script).
+PAGE_WITH_CHROME = ("<!DOCTYPE html><html><head>" + UC.MARKER_HEAD + "</head><body>"
+                    + UC.MARKER + "<h1>page body</h1>" + UC.MARKER_JS
+                    + "</body></html>")
 
 
 # ---------------------------------------------------------------- health / pages
@@ -29,11 +37,36 @@ def test_the_three_pages_are_served_from_the_static_directory(sandbox):
     for path, name in (("/", "index.html"), ("/index.html", "index.html"),
                        ("/history", "history.html"), ("/console", "console.html"),
                        ("/console.html", "console.html")):
-        (sandbox / "static" / name).write_text(f"<h1>{name}</h1>")
+        (sandbox / "static" / name).write_text(PAGE_WITH_CHROME)
         status, headers, body = request(H, "GET", path)
         assert status == 200, path
-        assert body == f"<h1>{name}</h1>".encode()
         assert headers["content-type"].startswith("text/html")
+        text = body.decode("utf-8")
+        assert "<h1>page body</h1>" in text          # the page's own content survives
+        assert 'id="zgx-strip"' in text              # the shared status strip
+        assert UC.MARKER not in text                 # markers were expanded, not leaked
+
+
+def test_each_page_is_served_with_its_own_view_marked(sandbox):
+    """The nav is one definition; which tab is lit depends on the URL asked for."""
+    for path, name, active in (("/", "index.html", "/"),
+                               ("/console", "console.html", "/console"),
+                               ("/history", "history.html", "/history")):
+        (sandbox / "static" / name).write_text(PAGE_WITH_CHROME)
+        status, _, body = request(H, "GET", path)
+        assert status == 200
+        nav = re.search(r'<nav class="views".*?</nav>', body.decode("utf-8"), re.S).group(0)
+        assert f'<a class="badge on" href="{active}" aria-current="page">' in nav
+        assert nav.count('aria-current="page"') == 1
+
+
+def test_a_page_without_the_chrome_markers_fails_loudly(sandbox):
+    """No silent degradation: a page that cannot get the frame is a 500, named."""
+    (sandbox / "static" / "index.html").write_text("<h1>no chrome here</h1>")
+    status, headers, body = request(H, "GET", "/")
+    assert status == 500
+    assert headers["content-type"].startswith("text/plain")
+    assert b"index.html" in body and b"chrome" in body
 
 
 def test_a_missing_page_reports_500_with_the_filename():

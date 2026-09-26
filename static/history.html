@@ -3,24 +3,14 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Quant results — history</title>
+<title>ZGX · quant history</title>
+<!--ZgX:chrome-head-->
 <style>
-  :root { --bg:#0d1117; --card:#161b22; --line:#30363d; --fg:#e6edf3; --dim:#8b949e;
-          --a:#58a6ff; --b:#3fb950; --c:#d29922; --d:#f85149; }
-  * { box-sizing:border-box; }
-  body { margin:0; background:var(--bg); color:var(--fg);
-         font:14px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace; }
-  header { display:flex; flex-wrap:wrap; gap:10px; align-items:baseline;
-           padding:14px 18px; border-bottom:1px solid var(--line);
-           position:sticky; top:0; background:var(--bg); z-index:5; }
-  header h1 { font-size:15px; margin:0; font-weight:600; }
-  header a { color:var(--a); text-decoration:none; }
-  header label { font-size:11px; color:var(--dim); text-transform:uppercase; letter-spacing:.06em; }
+  /* Page-specific rules only. The frame -- design tokens, header, badges, view tabs and the
+     status strip -- is injected from ui_chrome.py. `select` here is this page's model picker;
+     the shared stylesheet carries the uppercase `header label` rule. */
   select { background:var(--card); color:var(--fg); border:1px solid var(--line);
            border-radius:6px; padding:3px 7px; font:12px ui-monospace,Menlo,monospace; }
-  .badge { padding:2px 8px; border:1px solid var(--line); border-radius:999px; color:var(--dim); }
-  .badge.live { color:var(--b); border-color:var(--b); }
-  .badge.warn { color:var(--c); border-color:var(--c); }
   main { padding:14px 18px 60px; display:grid; gap:14px;
          grid-template-columns:repeat(auto-fit,minmax(430px,1fr)); }
   .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px 14px;
@@ -59,13 +49,11 @@
 </head>
 <body>
 <header>
-  <h1>Quant results — history</h1>
+<!--ZgX:chrome-->
   <label for="model-select">model</label>
   <select id="model-select"></select>
   <span class="badge" id="gen">loading…</span>
   <span class="badge" id="counts">—</span>
-  <a href="/" class="badge">live load view →</a>
-  <a href="/console" class="badge">console: switch / run / download →</a>
   <span class="badge">dgx spark .107</span>
 </header>
 <main>
@@ -452,5 +440,6 @@ async function load() {
 load();
 setInterval(load, 60000);
 </script>
+<!--ZgX:chrome-js-->
 </body>
 </html>

@@ -26,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from corrected_metrics import overlay as _correct   # noqa: E402
 import console_core as C                            # noqa: E402
 import live_metrics as LM                           # noqa: E402
+import ui_chrome as UC                              # noqa: E402
 
 LOAD = Path(os.environ.get("RUNBOARD_LOAD", "/root/load"))
 # Static pages live beside the modules in the deployment and under static/ in a checkout.
@@ -201,11 +202,11 @@ class Handler(BaseHTTPRequestHandler):
                            json.dumps({"error": f"{type(exc).__name__}: {exc}"}).encode())
 
         elif path in ("/console", "/console.html"):
-            self._page(CONSOLE_HTML)
+            self._page(CONSOLE_HTML, "/console")
         elif path in ("/history", "/history.html"):
-            self._page(HISTORY_HTML)
+            self._page(HISTORY_HTML, "/history")
         elif path in ("/", "/index.html"):
-            self._page(HTML)
+            self._page(HTML, "/")
         elif path == "/health":
             self._send(200, "application/json", b'{"ok":true}')
         else:
@@ -213,11 +214,22 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------------------------------------------------------------- plumbing
 
-    def _page(self, path: Path):
+    def _page(self, path: Path, active: str):
+        """Serve a page with the shared chrome injected.
+
+        The frame (stylesheet, nav, status strip) comes from ui_chrome so all three pages
+        render one nav from one definition. A page missing its markers is a page that would
+        lose its navigation and its run-state strip, so this fails loudly with the name.
+        """
         try:
-            self._send(200, "text/html; charset=utf-8", path.read_bytes())
+            html = UC.inject(path.read_text(encoding="utf-8"), active)
+        except ValueError as exc:
+            self._send(500, "text/plain", f"{path.name}: {exc}".encode())
+            return
         except Exception:
             self._send(500, "text/plain", f"{path.name} missing".encode())
+            return
+        self._send(200, "text/html; charset=utf-8", html.encode("utf-8"))
 
     def _json(self, obj):
         self._send(200, "application/json", json.dumps(obj, default=str).encode())
