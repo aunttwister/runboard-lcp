@@ -105,8 +105,16 @@ def _fresh_sandbox():
 
 
 @pytest.fixture(autouse=True)
-def _guard_production_paths():
-    """Fail loudly if a test leaves the sandbox -- on disk or on the host."""
+def _guard_production_paths(request):
+    """Fail loudly if a test leaves the sandbox -- on disk or on the host.
+
+    ``browser`` tests opt out of the host check only: driving a real browser means spawning
+    one, which is exactly what this guard exists to stop every *other* test from doing. They
+    are deselected by default and never run as part of the hermetic suite.
+    """
+    if request.node.get_closest_marker("browser"):
+        yield
+        return
     HOST_ACTIONS.clear()
     yield
     import console_core as C

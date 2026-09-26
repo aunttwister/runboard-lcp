@@ -6,8 +6,15 @@ requires-python = ">=3.10"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q --cov --cov-report=term-missing"
+# The browser suite drives a real browser against a live deployment, so it is opt-in:
+#   pytest -m browser tests/browser --no-cov
+# It exists because the rest of the suite reads console.html as text and cannot see a runtime
+# error in a click handler -- twice caught broken pages while those assertions were green.
+addopts = "-q --cov --cov-report=term-missing -m \"not browser\""
 filterwarnings = ["error::DeprecationWarning"]
+markers = [
+  "browser: drives a real browser against a live console (needs playwright + the deployment up)",
+]
 
 [tool.coverage.run]
 source = ["."]

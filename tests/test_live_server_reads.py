@@ -306,6 +306,20 @@ def test_the_console_explains_a_refused_write_instead_of_only_echoing_it():
     assert "const WRITE_FAIL = {" in html
     assert "401: 'the token saved in this browser is wrong or missing" in html
     assert "503: 'no dispatch token is configured on the server" in html
-    assert html.count("if (r.status === 401 || r.status === 503) checkToken();") == 2, \
-        "both write paths (queue a run, queue a switch) must re-check the token they blame"
-    assert "writeFailed(r)" in html
+    # both write paths (queue a run, queue a switch) hold the refusal and re-check the token
+    assert html.count("LAST_FAIL = { status: r.status, error: r.body.error };") == 2
+    assert html.count("await checkToken();") == 2
+    assert html.count("LAST_FAIL = null;") == 3        # the declaration + one clear per attempt
+    # ...and the explanation must survive that re-check. The first version wrote the message and
+    # then let the token line overwrite it in the same turn, so it was never on screen at all --
+    # a screenshot caught it after the tests, which only asserted the strings were present.
+    assert "function renderHint(" in html
+    # The argument shapes must agree. writeFailed takes (status, message); the first version took
+    # a whole response and read r.body.error, but renderHint passed the stored refusal
+    # {status, error} -- so r.body was undefined and the click handler died with a TypeError,
+    # leaving the hint on "queueing…" forever. This file cannot run JS, so it pins the shapes.
+    assert "function writeFailed(status, error)" in html
+    assert 'esc(error || "failed")' in html
+    assert "if (LAST_FAIL) lines.push(writeFailed(LAST_FAIL.status, LAST_FAIL.error));" in html
+    assert "writeFailed(r)" not in html          # no call site passes a bare response
+    assert 'lines.join("<br>")' in html

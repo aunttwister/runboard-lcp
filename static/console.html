@@ -265,7 +265,7 @@ async function checkToken() {
 }
 
 function renderTokenState() {
-  $("dispatch-hint").innerHTML = TOKEN_HINT[TOKEN_STATE] || TOKEN_HINT.unknown;
+  renderHint();
   if (MODELS) renderModels(MODELS);        // the gate table states the same fact
 }
 
@@ -406,30 +406,55 @@ const WRITE_FAIL = {
   503: 'no dispatch token is configured on the server &mdash; writes fail closed until one is set',
 };
 
-function writeFailed(r) {
-  const extra = WRITE_FAIL[r.status] ? " &mdash; " + WRITE_FAIL[r.status] : "";
-  return `<span class="bad">${r.status}: ${esc(r.body.error || "failed")}</span>${extra}`;
+// Takes a status and an error MESSAGE, not a response object. It used to take the response and
+// read r.body.error; when renderHint started passing the stored refusal ({status, error}) that
+// silently became `undefined.body` and threw inside the click handler -- which showed up as the
+// hint sitting on "queueing…" forever, with nothing in the page to say why. Keep this signature
+// and its call sites in step: tests/test_live_server_reads.py asserts the shapes agree.
+function writeFailed(status, error) {
+  const extra = WRITE_FAIL[status] ? " &mdash; " + WRITE_FAIL[status] : "";
+  return `<span class="bad">${status}: ${esc(error || "failed")}</span>${extra}`;
+}
+
+// The most recent refused write, cleared by the next attempt. It has to be held here rather than
+// written straight into the hint, because a refusal re-checks the token -- and the first version of
+// this wrote the specific explanation and then let the token hint immediately overwrite it, so the
+// explanation was never on screen for a single frame. Neither line is redundant: one names what
+// happened, the other names what to do about it.
+let LAST_FAIL = null;
+
+function renderHint() {
+  const lines = [];
+  if (LAST_FAIL) lines.push(writeFailed(LAST_FAIL.status, LAST_FAIL.error));
+  lines.push(TOKEN_HINT[TOKEN_STATE] || TOKEN_HINT.unknown);
+  $("dispatch-hint").innerHTML = lines.join("<br>");
 }
 
 $("dispatch-btn").onclick = async () => {
   const payload = { action: "eval", preset: $("preset").value, engine: $("engine").value };
+  LAST_FAIL = null;
   $("dispatch-hint").textContent = "queueing…";
   const r = await post("/api/dispatch", payload);
-  $("dispatch-hint").innerHTML = r.status === 202
-    ? `<span class="ok">queued ${esc(r.body.job_id)}</span>`
-    : writeFailed(r);
-  if (r.status === 401 || r.status === 503) checkToken();
+  if (r.status === 202) {
+    $("dispatch-hint").innerHTML = `<span class="ok">queued ${esc(r.body.job_id)}</span>`;
+  } else {
+    LAST_FAIL = { status: r.status, error: r.body.error };
+    await checkToken();     // renders the status line AND the token state it blames
+  }
   refresh();
 };
 
 $("serve-btn").onclick = async () => {
   const target = $("serve-target").value;
   if (!target) return;
+  LAST_FAIL = null;
   const r = await post("/api/dispatch", { action: "serve", engine: target });
-  $("dispatch-hint").innerHTML = r.status === 202
-    ? `<span class="ok">switch queued to ${esc(target)}</span>`
-    : writeFailed(r);
-  if (r.status === 401 || r.status === 503) checkToken();
+  if (r.status === 202) {
+    $("dispatch-hint").innerHTML = `<span class="ok">switch queued to ${esc(target)}</span>`;
+  } else {
+    LAST_FAIL = { status: r.status, error: r.body.error };
+    await checkToken();
+  }
   refresh();
 };
 
