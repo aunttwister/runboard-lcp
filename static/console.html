@@ -10,8 +10,11 @@
      status strip -- is injected from ui_chrome.py, so this page and the other two cannot
      disagree about the nav or about the design tokens. */
   header label { font-size:11px; color:var(--dim); text-transform:uppercase; letter-spacing:.06em; }
+  /* Two columns, not auto-fit: see the note on the load-telemetry page. auto-fit sized the
+     grid from the viewport, so the pair of half-width cards (dispatch + job state) occupied
+     2 of 3 tracks at 1440px (measured 454px cards) and left the third empty. */
   main { padding:14px 18px 60px; display:grid; gap:14px;
-         grid-template-columns:repeat(auto-fit,minmax(430px,1fr)); }
+         grid-template-columns:repeat(2,minmax(0,1fr)); }
   .card { background:var(--card); border:1px solid var(--line); border-radius:8px;
           padding:12px 14px; min-width:0; overflow-x:auto; }
   .card.wide { grid-column:1/-1; }
@@ -74,6 +77,8 @@
   .spark svg { display:block; width:180px; height:34px; }
   .spark polyline { fill:none; stroke:var(--a); stroke-width:1.5; }
   .spark .empty { color:var(--dim); font-size:11px; }
+  /* One column below 900px. This page carried the rule alone; the other two never collapsed,
+     which is the drift tests/test_page_layout.py now pins. */
   @media (max-width:900px) { main { grid-template-columns:minmax(0,1fr); } }
 
   /* Kiosk mode for the 2U wall screen (1280x400), enabled by ?kiosk=1. The display has no

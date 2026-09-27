@@ -11,8 +11,11 @@
      the shared stylesheet carries the uppercase `header label` rule. */
   select { background:var(--card); color:var(--fg); border:1px solid var(--line);
            border-radius:6px; padding:3px 7px; font:12px ui-monospace,Menlo,monospace; }
+  /* Two columns, not auto-fit: see the note on the load-telemetry page. auto-fit sized the
+     grid from the viewport, so the pair of half-width cards (measurement coverage + quarantined)
+     occupied 2 of 3 tracks at 1440px (measured 454px cards) and left the third empty. */
   main { padding:14px 18px 60px; display:grid; gap:14px;
-         grid-template-columns:repeat(auto-fit,minmax(430px,1fr)); }
+         grid-template-columns:repeat(2,minmax(0,1fr)); }
   .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px 14px;
           min-width:0; overflow-x:auto; }
   .card h2 { font-size:12px; margin:0 0 10px; color:var(--dim); font-weight:600;
@@ -28,6 +31,9 @@
   .bad { color:var(--d); }
   .note { color:var(--dim); font-size:11px; margin-top:8px; }
   .wide { grid-column:1/-1; }
+  /* One column below 900px: two cards do not fit a phone, and this keeps the rule identical
+     on every page (console.html carried it alone; this page never collapsed). */
+  @media (max-width:900px) { main { grid-template-columns:minmax(0,1fr); } }
   .bar { height:9px; background:var(--a); border-radius:2px; display:inline-block; vertical-align:middle; }
   .barwrap { width:110px; display:inline-block; }
   details.et { border:1px solid var(--line); border-radius:6px; margin-bottom:6px;
