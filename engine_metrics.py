@@ -110,6 +110,14 @@ RATE_ITEMS = [
 
 # The chart. Four series would need two axes to stay honest, so the chart carries the three
 # throughput numbers (same scale) and `running` remains a headline KPI.
+# Every key the block publishes, in card order. The page's KPI wiring is checked against this
+# tuple (tests/test_engine_metrics.py): a key published but never rendered, or rendered but never
+# published, shows up only as an empty cell on the board -- which is indistinguishable from "no
+# traffic" and is exactly the failure this card exists to avoid.
+ITEM_KEYS = (tuple(k for k, *_ in GAUGE_ITEMS)
+             + tuple(k for k, *_ in RATE_ITEMS)
+             + ("stream_tps",))
+
 SERIES = [
     ("output_tps", "output tok/s (engine-wide)"),
     ("prefill_tps", "prefill tok/s"),
@@ -306,6 +314,18 @@ def _note(reachable: bool, no_metrics: bool, prom_ok: bool, model) -> str:
     return f"{head}. {tail}."
 
 
+def _ratio(item_a, item_b):
+    """a / b from two already-built items: None when either side is absent or b is zero.
+
+    Dividing by a zero `running` is not "0 tok/s per stream", it is "no stream to divide by" --
+    the same rule as every other number on this card.
+    """
+    a, b = item_a.get("value"), item_b.get("value")
+    if a is None or b is None or b == 0:
+        return None
+    return a / b
+
+
 def block(now=None, fetch=None, use_cache=True, window_s=1800, step_s=60):
     """Assemble the engine block. Never raises: a dead source degrades this card only."""
     fetch = fetch or http_get
@@ -355,6 +375,16 @@ def block(now=None, fetch=None, use_cache=True, window_s=1800, step_s=60):
     if prom_ok:
         sources.append({"name": "prometheus", "url": PROM_URL, "ok": True,
                         "detail": f"{answered} instant queries, job {PROM_JOB}"})
+
+    # The per-stream decode rate: engine-wide output over requests running. It is the number the
+    # retired Grafana dashboard called "THE decoding capability metric", and it is what "tok/s"
+    # means to a reader asking how fast ONE client is being served -- the question behind "whatever
+    # L1 is doing". Derived from the two items above (their DISPLAYED values, so it cannot
+    # disagree with them by a rounding) rather than a third query of its own.
+    by_key = {it["key"]: it for it in items}
+    items.append(_item("stream_tps", "tok/s per stream", "tok/s",
+                       _ratio(by_key["output_tps"], by_key["running"]), "num2",
+                       "output rate / requests running, read now"))
 
     doc = {
         "ok": bool((reachable and not no_metrics) or prom_ok),

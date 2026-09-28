@@ -297,7 +297,25 @@ def test_prefill_throughput_counts_only_the_tokens_the_gpu_actually_computed():
     assert "request_prompt_tokens_sum" not in EM.EXPR["prefill_tps"]
 
 
-def test_prom_range_drops_values_it_cannot_use():
+def test_tok_per_stream_is_the_output_rate_over_requests_running():
+    """The number a reader asking "how fast does it generate" means: one client's share of the
+    engine. With a single stream it must equal the engine-wide rate, and with nothing running it
+    must be absent rather than 0 -- 0 tok/s per stream claims a measured idle stream."""
+    one = EM.block(now=1_000, fetch=route(values={"vllm:num_requests_running": "1"}), use_cache=False)
+    items = {i["key"]: i for i in one["items"]}
+    assert set(items) == set(EM.ITEM_KEYS), "the published key set is the contract"
+    assert items["stream_tps"]["value"] == items["output_tps"]["value"]
+
+    idle = EM.block(now=1_000, fetch=route(values={"vllm:num_requests_running": "0"}), use_cache=False)
+    assert {i["key"]: i for i in idle["items"]}["stream_tps"]["value"] is None
+
+    gone = EM.block(now=1_000, fetch=route(values={"vllm:num_requests_running": "0",
+                                                   "rate(vllm:generation_tokens_total": "None"}),
+                   use_cache=False)
+    assert {i["key"]: i for i in gone["items"]}["stream_tps"]["value"] is None
+
+
+def test_prom_range_drops_values_that_are_not_numbers():
     """A NaN or a text value in the middle of a series must leave a gap, not a break in the line."""
     pts = [[1000, "1.5"], [1060, "nan"], [1120, "oops"], [1180, "2.5"]]
     out = EM.prom_range("q", window_s=180, step_s=60, now=1180, fetch=route(range_points=pts))
@@ -352,8 +370,7 @@ PUT_RE = re.compile(r'put\("([\w-]+)",\s*"([\w-]+)"\)')
 def test_the_card_renders_every_number_the_module_publishes():
     pairs = PUT_RE.findall(PAGE)
     assert pairs, "the engine card has no KPI wiring at all"
-    published = {k for k, *_ in EM.GAUGE_ITEMS} | {k for k, *_ in EM.RATE_ITEMS}
-    assert {key for _id, key in pairs} == published
+    assert {key for _id, key in pairs} == set(EM.ITEM_KEYS)
 
 
 def test_every_engine_card_id_exists_in_the_markup():
@@ -367,6 +384,21 @@ def test_every_engine_card_id_exists_in_the_markup():
 def test_the_card_charts_every_published_series():
     for key, _label in EM.SERIES:
         assert f"byKey.{key}" in PAGE, f"series {key} is published but never drawn"
+
+
+def test_an_isolated_sample_is_drawn_as_a_dot_not_an_invisible_segment():
+    """Prefill arrives in bursts: one interval out of 31 can carry traffic and the rest be gaps.
+
+    A polyline through one point draws nothing, so the pane rendered axes with no trace -- the
+    chart looked broken rather than sparse (seen on the deployed card 2026-09-28, then fixed by
+    dotting every sample that has no neighbour). The shared helper draws all the card's charts, so
+    this is asserted once, on the helper.
+    """
+    # up to the NEXT top-level function, not to the next closing brace (the helper is nested)
+    helper = PAGE.split("function line(")[1].split("\nfunction ")[0]
+    assert "fit(cv)" in helper and "ctx.stroke()" in helper  # sanity: we are looking at the helper
+    assert "neighbour" in helper
+    assert helper.count("ctx.arc(") >= 2, "isolated samples and the last sample must both dot"
 
 
 def test_prefill_is_charted_on_its_own_axis():

@@ -56,6 +56,7 @@
     <h2>Engine load — every request, eval or not <span class="badge" id="eng-src">…</span></h2>
     <div class="kpis">
       <div class="kpi"><div class="v" id="k-eng-out">—</div><div class="l">output tok/s (whole engine)</div></div>
+      <div class="kpi"><div class="v" id="k-eng-stream">—</div><div class="l">tok/s per stream</div></div>
       <div class="kpi"><div class="v" id="k-eng-pre">—</div><div class="l">prefill tok/s (finished reqs)</div></div>
       <div class="kpi"><div class="v" id="k-eng-dec">—</div><div class="l">decode tok/s (finished reqs)</div></div>
       <div class="kpi"><div class="v" id="k-eng-ttft">—</div><div class="l">TTFT p50 s</div></div>
@@ -169,16 +170,26 @@ function line(cv, series, colors, labels) {
   ctx.fillStyle = "#8b949e"; ctx.font = "10px ui-monospace,monospace";
   ctx.fillText(hi.toFixed(1), 4, pad.t + 8);
   ctx.fillText(lo.toFixed(1), 4, pad.t + ih);
+  const gap = (x) => x === null || x === undefined || Number.isNaN(x);
   series.forEach((s, k) => {
     ctx.strokeStyle = colors[k]; ctx.lineWidth = 1.6; ctx.beginPath();
     let started = false;
     s.forEach((v, i) => {
-      if (v === null || v === undefined || Number.isNaN(v)) { started = false; return; }  // gaps, not zeros
+      if (gap(v)) { started = false; return; }  // gaps, not zeros
       if (!started) { ctx.moveTo(X(i), Y(v)); started = true; } else { ctx.lineTo(X(i), Y(v)); }
     });
     ctx.stroke();
-    if (s.length) { const lv = s[s.length - 1]; if (lv !== null && !Number.isNaN(lv)) {
-      ctx.fillStyle = colors[k]; ctx.beginPath(); ctx.arc(X(s.length - 1), Y(lv), 2.5, 0, 6.30); ctx.fill(); } }
+    ctx.fillStyle = colors[k];
+    // A sample with NO neighbour on either side draws no segment, so it must be drawn as a dot.
+    // The prefill pane on the engine card is exactly this case -- one interval out of 31 carried
+    // prefill -- and without the dot the pane showed axes and nothing else (2026-09-28), which
+    // reads as a broken chart rather than as one measured burst.
+    s.forEach((v, i) => {
+      if (gap(v) || !(gap(s[i - 1] === undefined ? null : s[i - 1]) && gap(s[i + 1] === undefined ? null : s[i + 1]))) return;
+      ctx.beginPath(); ctx.arc(X(i), Y(v), 2.5, 0, 6.30); ctx.fill();
+    });
+    if (s.length) { const lv = s[s.length - 1]; if (!gap(lv)) {
+      ctx.beginPath(); ctx.arc(X(s.length - 1), Y(lv), 2.5, 0, 6.30); ctx.fill(); } }
   });
   if (labels) { ctx.fillStyle = "#8b949e"; ctx.fillText(labels[0], pad.l, h - 5); }
 }
@@ -262,7 +273,8 @@ function renderEngine(live) {
     const x = items[key];
     $(id).textContent = (x && x.value !== null && x.value !== undefined) ? String(x.value) : "\u2014";
   };
-  put("k-eng-out", "output_tps"); put("k-eng-pre", "prefill_tps"); put("k-eng-dec", "decode_tps");
+  put("k-eng-out", "output_tps"); put("k-eng-stream", "stream_tps");
+  put("k-eng-pre", "prefill_tps"); put("k-eng-dec", "decode_tps");
   put("k-eng-ttft", "ttft_p50"); put("k-eng-ttft95", "ttft_p95");
   put("k-eng-run", "running"); put("k-eng-wait", "waiting");
   put("k-eng-kv", "kv_pct"); put("k-eng-mtp", "mtp_accept"); put("k-eng-prefix", "prefix_hit");
