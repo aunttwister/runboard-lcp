@@ -16,13 +16,14 @@ def test_modules_import_from_the_checkout():
     import console_core
     import corrected_metrics
     import dispatcher
+    import engine_metrics
     import history_collector
     import live_server
     import registry
     import zgx_exporter
 
-    for mod in (console_core, corrected_metrics, dispatcher, history_collector,
-                live_server, registry, zgx_exporter):
+    for mod in (console_core, corrected_metrics, dispatcher, engine_metrics,
+                history_collector, live_server, registry, zgx_exporter):
         origin = pathlib.Path(mod.__file__).resolve()
         assert origin.parent != pathlib.Path("/root/load"), f"{mod.__name__} came from prod"
         assert origin.name.endswith(".py")

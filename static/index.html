@@ -32,9 +32,15 @@
   .err { color:var(--d); white-space:pre-wrap; }
   .note { color:var(--dim); font-size:11px; margin-top:8px; }
   .wide { grid-column:1/-1; }
+  /* Two axes side by side inside the engine card (see the note under it): the two scales differ
+     by 100-1000x, and a shared axis would hide the generation trace. minmax(0,1fr) so a wide
+     canvas cannot push the card wider than its track. */
+  .charts { display:grid; gap:14px; grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .charthead { font-size:11px; color:var(--dim); margin-bottom:4px; }
   /* One column below 900px: two cards do not fit a phone, and this keeps the rule identical
      on every page (console.html carried it alone; the other two never collapsed). */
   @media (max-width:900px) { main { grid-template-columns:minmax(0,1fr); } }
+  @media (max-width:900px) { .charts { grid-template-columns:minmax(0,1fr); } }
 </style>
 </head>
 <body>
@@ -46,6 +52,38 @@
   <span id="unit" class="badge">:18300</span>
 </header>
 <main>
+  <div class="card wide">
+    <h2>Engine load — every request, eval or not <span class="badge" id="eng-src">…</span></h2>
+    <div class="kpis">
+      <div class="kpi"><div class="v" id="k-eng-out">—</div><div class="l">output tok/s (whole engine)</div></div>
+      <div class="kpi"><div class="v" id="k-eng-pre">—</div><div class="l">prefill tok/s (finished reqs)</div></div>
+      <div class="kpi"><div class="v" id="k-eng-dec">—</div><div class="l">decode tok/s (finished reqs)</div></div>
+      <div class="kpi"><div class="v" id="k-eng-ttft">—</div><div class="l">TTFT p50 s</div></div>
+      <div class="kpi"><div class="v" id="k-eng-ttft95">—</div><div class="l">TTFT p95 s</div></div>
+      <div class="kpi"><div class="v" id="k-eng-run">—</div><div class="l">requests running</div></div>
+      <div class="kpi"><div class="v" id="k-eng-wait">—</div><div class="l">requests waiting</div></div>
+      <div class="kpi"><div class="v" id="k-eng-kv">—</div><div class="l">KV cache used %</div></div>
+      <div class="kpi"><div class="v" id="k-eng-mtp">—</div><div class="l">MTP accepted %</div></div>
+      <div class="kpi"><div class="v" id="k-eng-prefix">—</div><div class="l">prefix cache hit %</div></div>
+      <div class="kpi"><div class="v" id="k-eng-req">—</div><div class="l">requests /min</div></div>
+      <div class="kpi"><div class="v" id="k-eng-e2e">—</div><div class="l">end-to-end ms (finished reqs)</div></div>
+    </div>
+    <div class="charts">
+      <div>
+        <div class="charthead">generation tok/s — blue output (engine-wide), green decode (finished reqs)</div>
+        <canvas id="c-eng"></canvas>
+      </div>
+      <div>
+        <div class="charthead">prefill tok/s — amber, prompt tokens the GPU actually computed</div>
+        <canvas id="c-eng-pre"></canvas>
+      </div>
+    </div>
+    <div class="note" id="eng-note">reading the engine…</div>
+    <div class="note">Two charts, not one: prefill runs 100–1000× the generation rate here (measured 1,382 tok/s
+      against 20 tok/s on 2026-09-28), so on a shared axis the output line is a flat line along the floor. A gap is
+      an interval that carried no such traffic — never a zero.</div>
+  </div>
+
   <div class="card">
     <h2>Throughput <span class="badge" id="tps-src">…</span></h2>
     <div class="kpis">
@@ -120,7 +158,11 @@ function line(cv, series, colors, labels) {
   if (!all.length) { ctx.fillStyle = "#8b949e"; ctx.fillText("no samples yet", pad.l + 6, pad.t + ih / 2); return; }
   let lo = Math.min(...all), hi = Math.max(...all);
   if (hi - lo < 1e-9) { hi = lo + 1; }
-  const padY = (hi - lo) * 0.08; lo -= padY; hi += padY;
+  const padY = (hi - lo) * 0.08;
+  // A non-negative series gets a non-negative floor: padding alone put -82.9 on a tok/s axis
+  // (measured on the engine card, 2026-09-28), which reads as a measurement, not as padding.
+  lo = (lo >= 0) ? Math.max(0, lo - padY) : lo - padY;
+  hi += padY;
   const n = Math.max(...series.map((s) => s.length));
   const X = (i) => pad.l + (n <= 1 ? iw / 2 : (i / (n - 1)) * iw);
   const Y = (v) => pad.t + ih - ((v - lo) / (hi - lo)) * ih;
@@ -194,8 +236,48 @@ function renderThroughput(st, live) {
   $("tps-note").textContent =
     "Soak archive, measured 2026-09-24: blue aggregate, green per-stream, one point per " +
     "completed phase. None of it moves while an eval run is going — an eval run's own " +
-    "throughput appears here as soon as one is running." +
+    "throughput appears here as soon as one is running. For what the engine is doing " +
+    "RIGHT NOW (no run required) see the engine-load card above." +
     (t && t.reason ? " (" + t.reason + ")" : "");
+}
+
+// The engine card is the one panel that is ALWAYS live. It reads the ENGINE's own counters, so
+// it is populated whether or not an eval is running -- an agent's model calls, a manual probe, a
+// second client. Before it existed, nothing on this page could answer "what is the box doing
+// now" unless a run happened to be in flight: measured 2026-09-28, a live generation at 20 tok/s
+// with nothing queued rendered as the 2026-09-24 soak archive.
+function renderEngine(live) {
+  const e = (live && live.engine) || null;
+  const src = $("eng-src");
+  if (!e) {
+    src.textContent = "no engine block";
+    src.className = "badge stale";
+    $("eng-note").textContent = "the live document carried no engine block";
+    line($("c-eng"), [], []);
+    return;
+  }
+  const items = {};
+  (e.items || []).forEach((x) => { items[x.key] = x; });
+  const put = (id, key) => {
+    const x = items[key];
+    $(id).textContent = (x && x.value !== null && x.value !== undefined) ? String(x.value) : "\u2014";
+  };
+  put("k-eng-out", "output_tps"); put("k-eng-pre", "prefill_tps"); put("k-eng-dec", "decode_tps");
+  put("k-eng-ttft", "ttft_p50"); put("k-eng-ttft95", "ttft_p95");
+  put("k-eng-run", "running"); put("k-eng-wait", "waiting");
+  put("k-eng-kv", "kv_pct"); put("k-eng-mtp", "mtp_accept"); put("k-eng-prefix", "prefix_hit");
+  put("k-eng-req", "req_per_min"); put("k-eng-e2e", "e2e_ms");
+
+  const up = !!e.reachable;
+  src.textContent = up ? ("engine " + (e.model || ":18300") + " \u00b7 read now") : "engine not answering";
+  src.className = "badge " + (up ? "live" : "stale");
+
+  const byKey = {};
+  (e.series || []).forEach((s) => { byKey[s.key] = s.values || []; });
+  line($("c-eng"), [byKey.output_tps || [], byKey.decode_tps || []], ["#58a6ff", "#3fb950"]);
+  line($("c-eng-pre"), [byKey.prefill_tps || []], ["#d29922"]);
+  const health = (e.sources || []).map((s) => s.name + " " + (s.ok ? "ok" : "DOWN")).join(" \u00b7 ");
+  $("eng-note").textContent = (e.note || "") + " [" + health + " \u00b7 " + (e.recorded || "") + "]";
 }
 
 function render(st, live) {
@@ -260,14 +342,17 @@ async function poll() {
       fetch("/api/state", { cache: "no-store" }),
       fetch("/api/live?window=30m", { cache: "no-store" }),
     ]);
+    // The engine card is rendered straight from /api/live, BEFORE the soak archive is required
+    // to parse: it must still appear when /api/state is missing or broken (no soak state yet).
+    if (rl.status === "fulfilled" && rl.value.ok) {
+      try { lastLive = await rl.value.json(); } catch (e) { /* keep the previous live doc */ }
+      renderEngine(lastLive);
+    }
     if (rs.status !== "fulfilled" || !rs.value.ok) {
       throw new Error("state HTTP " + (rs.status === "fulfilled" ? rs.value.status : "?"));
     }
     const st = await rs.value.json();
     lastGood = st;
-    if (rl.status === "fulfilled" && rl.value.ok) {
-      try { lastLive = await rl.value.json(); } catch (e) { /* keep the previous live doc */ }
-    }
     const age = st.now_age_s;
     const b = $("age");
     b.textContent = "state age " + (age === null || age === undefined ? "—" : age + " s");
@@ -277,6 +362,7 @@ async function poll() {
   } catch (e) {
     $("feed").innerHTML = '<span class="err">feed error: ' + String(e) + "</span>" +
       (lastGood ? " (showing last good state)" : "");
+    if (lastLive) renderEngine(lastLive);
     if (lastGood) render(lastGood, lastLive);
   }
 }

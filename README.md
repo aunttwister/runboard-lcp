@@ -8,10 +8,10 @@ Three views and one JSON surface, all served by a single stdlib HTTP server on p
 
 | path | what it is |
 |---|---|
-| `/` | now — live load, per-shape throughput, soak summary |
+| `/` | now — engine load (every request, run or not), per-shape throughput, soak summary |
 | `/history` | every banked run, ranked inside its own kit |
 | `/console` | switch engine, queue an eval, search HuggingFace and download a pack |
-| `/api/state` `/api/history` `/api/models` `/api/dispatch` | the JSON behind those pages |
+| `/api/state` `/api/history` `/api/models` `/api/dispatch` `/api/live` | the JSON behind those pages |
 
 The serving engine itself is a separate concern: exllamav3 on `:18300` behind
 `/root/serve.sh` (`cruz` \| `exl3` \| `vllm` \| `status`). This repo reads and drives that
@@ -29,6 +29,10 @@ live_server.py        the read-only HTTP server (:18400). Pages + JSON. Executes
 dispatcher.py         the executor. Runs as load-dispatch.service on a 15s timer.
 history_collector.py  folds run artifacts into run/history.json for /history.
 zgx_exporter.py       Prometheus exporter (:9400) for the Grafana dashboard.
+engine_metrics.py     what the SERVING ENGINE is doing right now: prefill/decode/output tok/s,
+                      TTFT, KV occupancy, prefix-cache hit rate, MTP acceptance, requests
+                      running/waiting -- read off :18300 and Prometheus (job zgx-vllm), so the
+                      page answers "what is the box doing" with no eval running.
 corrected_metrics.py  the one definition of aggregate throughput (tokens / wall clock).
 load_soak.py          the load-soak harness that produced the numbers on `/`.
 static/               the three pages (deployed flat into /root/load).
@@ -58,8 +62,15 @@ These are not style preferences; each one is the fix for something that actually
 5. **`status.json` is a receipt.** It preserves the last job's record across idle ticks so the
    page can answer "is the box back on the baseline?" after the job is long gone.
 6. **A missing measurement is a dash, never a zero.** Never blend decode-only throughput with
-   end-to-end, and never rank across kits. Unknown disk size reports as unknown.
-7. **Do not guess a key name.** The dispatcher's first summary reader guessed `auto_graded`
+   end-to-end, and never rank across kits. Unknown disk size reports as unknown. A rate that is
+   `null` means "no such traffic in that interval" (no request FINISHED, say) -- it is not 0.
+   `/api/live -> engine` is the surface where that distinction is load-bearing: a dash there and
+   the engine is idle, a 0.0 there and someone is being told the box is not working when it is.
+7. **The board answers about the ENGINE, not only about runs.** A run card plus a soak archive
+   left every non-eval use of the box (agent traffic, a manual probe) invisible: on 2026-09-28 a
+   live generation at 20 tok/s with nothing queued rendered as the previous day's soak. Anything
+   the box does has to be visible without a run being queued.
+8. **Do not guess a key name.** The dispatcher's first summary reader guessed `auto_graded`
    and reported all-null against an artifact that was fine; the HF search date field is
    `createdAt`, not `lastModified`. Read the names the source actually uses.
 
@@ -98,8 +109,8 @@ modules are imported and fails any test that reaches a production path. Tests mu
 the network, a GPU, a listening port, systemd, or the real `:18300`.
 
 Coverage target: **100%** of the service modules (`console_core`, `registry`, `dispatcher`,
-`live_server`, `history_collector`, `zgx_exporter`, `corrected_metrics`), enforced by
-`fail_under = 100`.
+`live_server`, `history_collector`, `zgx_exporter`, `corrected_metrics`, `live_metrics`,
+`engine_metrics`), enforced by `fail_under = 100`.
 
 **Deliberately out of the coverage target**, and stated rather than quietly omitted:
 

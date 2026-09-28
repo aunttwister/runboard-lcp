@@ -1,26 +1,33 @@
 """live_metrics: the grafana-replacement layer, including both failure paths.
 
-The rule this file exists to protect is that neither source may be able to lie. A dead
-exporter must produce dashes (not zeros), a dead Prometheus must empty only the history,
-and a metric the engine cannot expose must be reported as unavailable rather than
-approximated. Every test here fakes the HTTP boundary, so no test resolves a hostname,
-opens a socket, or reaches production.
+The rule this file exists to protect is that no source may be able to lie. A dead exporter
+must produce dashes (not zeros), a dead Prometheus must empty only the history, and a number
+the board cannot read must be declared missing rather than approximated. The engine's own
+load -- the part that used to be declared missing -- is now read, so it is asserted PRESENT
+(see test_the_unavailable_list_is_empty_because_the_engine_block_reads_all_of_it and
+tests/test_engine_metrics.py). Every test here fakes the HTTP boundary, so no test resolves a
+hostname, opens a socket, or reaches production.
 """
 from __future__ import annotations
 
 import json
+import urllib.parse
 
 import pytest
 
+import engine_metrics as EM
 import live_metrics as LM
 
 
 @pytest.fixture(autouse=True)
 def clean_cache():
-    """Module-level spark cache would otherwise leak between tests."""
+    """Both module-level caches would otherwise leak between tests -- and the engine one is
+    keyed by window, so a leaked document would answer the NEXT test's fetch with this one's."""
     LM._cache.update({"at": {}, "sparks": {}})
+    EM.reset_cache()
     yield
     LM._cache.update({"at": {}, "sparks": {}})
+    EM.reset_cache()
 
 
 class _Resp:
@@ -172,13 +179,22 @@ EXPORTER_TEXT = (
 ).encode()
 
 
-def _fetch(exporter=EXPORTER_TEXT, prom_body=None, prom_error=False):
-    """Route fake fetches by URL so one callable serves both sources."""
+ENGINE_TEXT = (b'vllm:num_requests_running{model_name="qwen3.8-flash-next",engine="0"} 1.0\n'
+               b'vllm:num_requests_waiting{model_name="qwen3.8-flash-next",engine="0"} 0.0\n'
+               b'vllm:kv_cache_usage_perc{model_name="qwen3.8-flash-next",engine="0"} 0.1\n')
+
+
+def _fetch(exporter=EXPORTER_TEXT, prom_body=None, prom_error=False, engine=ENGINE_TEXT):
+    """Route fake fetches by URL so one callable serves every source."""
     def f(url, timeout=None):
         if "9400" in url or "exporter" in url:
             if isinstance(exporter, Exception):
                 raise exporter
             return exporter
+        if ":18300" in url:
+            if isinstance(engine, Exception):
+                raise engine
+            return engine
         if prom_error:
             raise OSError("prometheus down")
         return prom_body if prom_body is not None else _range_body([[100, "1.0"]])
@@ -290,17 +306,31 @@ def test_a_dead_prometheus_empties_the_history_but_keeps_the_values():
     assert {m["key"]: m["value"] for m in doc["machine"]}["gpu_power"] == 10.9
 
 
-def test_build_live_with_cached_sparks_does_not_query_prometheus():
-    def explode(url, timeout=None):
-        if "exporter" in url or "9400" in url:
+def test_build_live_with_cached_sparks_does_not_rerun_the_spark_queries():
+    """The cached path must not re-ask for the four sparkline series.
+
+    Asserted on the queries actually issued rather than on "no URL but the exporter was
+    touched": the engine block legitimately queries Prometheus for its own series, and a blanket
+    fake would have to be loosened in a way that stops testing anything.
+    """
+    asked = []
+
+    def spy(url, timeout=None):
+        asked.append(urllib.parse.unquote(url))
+        if "9400" in url or "exporter" in url:
             return EXPORTER_TEXT
-        raise AssertionError("prometheus must not be queried when sparks are passed in")
+        if ":18300" in url:
+            return ENGINE_TEXT
+        return _range_body([[100, "1.0"]])
 
     cached = [{"key": "gpu_power", "series": [{"t": 1, "v": 9.0}]}]
-    doc = LM.build_live(now=10_000, fetch=explode, sparks=cached)
+    doc = LM.build_live(now=10_000, fetch=spy, sparks=cached)
     src = {s["name"]: s for s in doc["sources"]}
     assert doc["sparks"] == cached
     assert src["prometheus"]["ok"] is True and "cached" in src["prometheus"]["detail"]
+    spark_metrics = [metric for _k, _l, _u, metric in LM.SPARKS]
+    asked_sparks = [u for u in asked if any(m in u for m in spark_metrics)]
+    assert asked_sparks == [], f"spark queries re-run on the cached path: {asked_sparks}"
 
 
 def test_build_live_says_so_when_even_the_cache_is_empty():
@@ -310,10 +340,34 @@ def test_build_live_says_so_when_even_the_cache_is_empty():
     assert "no history source" in doc["sparks_note"]
 
 
-def test_the_unavailable_list_names_what_the_engine_cannot_expose():
+def test_the_unavailable_list_is_empty_because_the_engine_block_reads_all_of_it():
+    """Every name that used to be listed here is now measured and carried in doc["engine"].
+
+    This test replaces one that asserted the list CONTAINED "TTFT (p50/p90)" and "KV cache
+    usage". Keeping that assertion green while the engine block exists would pin the board to
+    a claim that it is blind to numbers it publishes, which is the defect the engine block was
+    added to fix.
+    """
     doc = LM.build_live(now=10_000, fetch=_fetch())
-    assert "TTFT (p50/p90)" in doc["unavailable"]
-    assert any("KV cache" in u for u in doc["unavailable"])
+    assert doc["unavailable"] == []
+    measured = {i["key"] for i in doc["engine"]["items"]}
+    assert {"ttft_p50", "kv_pct", "running", "waiting", "prefix_hit", "mtp_accept"} <= measured
+
+
+def test_build_live_carries_the_engine_load_from_the_engine_itself():
+    doc = LM.build_live(now=10_000, fetch=_fetch())
+    eng = doc["engine"]
+    assert eng["model"] == "qwen3.8-flash-next" and eng["reachable"] is True
+    assert {i["key"]: i["value"] for i in eng["items"]}["running"] == 1
+    src = {s["name"]: s for s in doc["sources"]}
+    assert src["engine"]["ok"] is True and src["engine"]["url"] == EM.ENGINE_URL
+
+
+def test_the_engine_block_survives_the_engine_being_down_without_taking_the_page_with_it():
+    doc = LM.build_live(now=10_000, fetch=_fetch(engine=OSError("refused")))
+    assert doc["engine"]["reachable"] is False
+    assert {m["key"]: m["value"] for m in doc["machine"]}["serving_up"] == 1
+    assert {s["name"]: s for s in doc["sources"]}["engine"]["ok"] is False
 
 
 # ------------------------------------------------------------------ caching

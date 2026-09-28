@@ -10,14 +10,14 @@ Two sources, on purpose:
     we do not keep a ring buffer here, because a web process that accumulates state
     is a web process whose bug becomes a data bug.
 
-What this deliberately does NOT do is invent a number. ``TTFT (p50/p90)``, KV-cache
-usage, prefix-cache hit rate, spec-decode acceptance and requests-running have no
-mapping in this panel YET, so they are reported as unavailable rather than
-approximated -- a panel that invents a plausible TTFT is worse than one that says it
-has none. Whether the engine on :18300 publishes those metrics at all is probed per
-request (``engine_metrics_note``) instead of hardcoded: the engine there is swappable
-(exllamav3 exposes none, vLLM publishes the whole ``vllm:*`` family), and a fixed
-claim about a swappable component is a claim that rots.
+What this deliberately does NOT do is invent a number. The engine's own counters -- TTFT,
+KV-cache occupancy, prefix-cache hit rate, spec-decode/MTP acceptance, requests running and
+waiting, prefill/decode tok/s -- used to be named here as unavailable "yet". They are now READ:
+``engine_metrics.py`` puts them in ``doc["engine"]``, straight off the engine and out of
+Prometheus, so the whole list is empty and the console has no gap sentence to print. Whether
+the engine on :18300 publishes them at all is still probed per request (``engine_metrics_note``)
+instead of hardcoded: the engine there is swappable (exllamav3 exposes none, vLLM publishes the
+whole ``vllm:*`` family), and a fixed claim about a swappable component is a claim that rots.
 
 Honesty rules carried over from the exporter and the load harness:
 
@@ -36,6 +36,7 @@ import time
 import urllib.parse
 import urllib.request
 
+import engine_metrics as EM
 import run_throughput as RT
 
 # One env var per source so a checkout/test never talks to production by default.
@@ -88,17 +89,14 @@ RUN_ITEMS = [
     ("errors", "Request errors", "", "zgx_load_errors_total", "int"),
 ]
 
-# Metrics the Grafana vLLM dashboard showed that have NO source while EXL3 serves the
-# port. Named explicitly so the page can state the gap instead of leaving it implied.
-UNAVAILABLE = [
-    "TTFT (p50/p90)",
-    "KV cache usage",
-    "prefix-cache hit rate",
-    "spec-decode / MTP acceptance",
-    "requests running / waiting",
-]
+# Metrics the Grafana vLLM dashboard showed that this panel still cannot read. EMPTY since
+# 2026-09-28, and that is the point: every name that used to be listed here is now measured (see
+# engine_metrics and doc["engine"]), so printing the list would be a claim that the board is
+# missing something it has. It stays as the one place a future gap is declared -- the console
+# renders the sentence only when it is non-empty.
+UNAVAILABLE: list = []
 
-ENGINE_METRICS = "http://127.0.0.1:18300/metrics"
+ENGINE_METRICS = EM.ENGINE_URL
 
 
 def engine_metrics_note(fetch):
@@ -110,14 +108,19 @@ def engine_metrics_note(fetch):
     acceptance, requests running). A page that states a fixed fact about a swappable
     component goes stale the moment the component is swapped, so the sentence is now
     derived from a probe. It cannot claim a source is missing when it is answering.
+
+    Updated 2026-09-28: the probe's middle branch used to read "...that this panel does not
+    read yet", which stopped being true the same day engine_metrics started reading them.
+    The sentence is only ever printed when UNAVAILABLE is non-empty, so as long as the list
+    is empty this is documentation of the last gap rather than a claim on the page.
     """
     try:
         body = fetch(ENGINE_METRICS) or b""
     except Exception:
         return "the serving engine on :18300 did not answer /metrics: "
     if body.strip():
-        return ("the serving engine publishes Prometheus metrics on :18300 that this "
-                "panel does not read yet: ")
+        return ("the serving engine publishes Prometheus metrics on :18300; its own load is read "
+                "now, see the engine block of /api/live, so nothing is missing here: ")
     return "the serving engine on :18300 exposes no /metrics endpoint: "
 
 _LINE = re.compile(r"^(?P<name>[a-zA-Z_:][a-zA-Z0-9_:]*)(?P<labels>\{.*\})?\s+(?P<value>\S+)")
@@ -266,6 +269,17 @@ def build_live(now=None, fetch=None, exporter_url=None, sparks=None, window=None
     # `state` at the top level while the job's own id/preset/engine sit under `job`;
     # _job_block is the one place that knows that shape.
     doc["throughput"] = RT.block(doc["job"], presets=presets)
+
+    # ---- the engine's own load: EVERY request it served, run or not (see engine_metrics).
+    # This is the block that answers "what is the box doing right now" when no eval is running,
+    # which is most of the time -- an agent's model calls, a manual probe, a second client. It
+    # was missing until 2026-09-28: the page had a run card and a soak archive, so a live
+    # generation at 20 tok/s with nothing queued rendered as "nothing running".
+    engine = EM.block(now=now, fetch=fetch, window_s=wsecs, step_s=wstep)
+    doc["engine"] = engine
+    doc["sources"].append({"name": "engine", "url": EM.ENGINE_URL,
+                           "ok": bool(engine["reachable"]),
+                           "detail": engine["sources"][0]["detail"]})
 
     # ---- source 1: the local exporter (current values)
     plain = {}
