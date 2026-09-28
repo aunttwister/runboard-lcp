@@ -116,7 +116,7 @@ RATE_ITEMS = [
 # traffic" and is exactly the failure this card exists to avoid.
 ITEM_KEYS = (tuple(k for k, *_ in GAUGE_ITEMS)
              + tuple(k for k, *_ in RATE_ITEMS)
-             + ("stream_tps", "gen_win", "last_gen"))
+             + ("stream_tps", "ss_decode_tps", "gen_win", "last_gen"))
 
 SERIES = [
     ("output_tps", "output tok/s (engine-wide)"),
@@ -124,12 +124,22 @@ SERIES = [
     ("decode_tps", "decode tok/s"),
 ]
 
+SS_MAXLEN = int(os.environ.get("RUNBOARD_ENGINE_SS_SAMPLES", "20"))
+
 _cache: dict = {"docs": {}, "at": {}, "series": {}, "series_at": {}}
+
+# Single-stream decode: the rate ONE stream actually sees. vLLM's counters are engine-wide and
+# carry no per-request label, so this can only be measured from an interval in which exactly one
+# request finished -- and such intervals are exactly what "single stream" means. Kept in process:
+# the live server polls this module every few seconds, so the deltas come for free with the gauge
+# read that already happens.
+_ss: dict = {"prev": None, "samples": []}
 
 
 def reset_cache() -> None:
     """Drop the memoised documents and series (tests, and any caller that wants a cold read)."""
     _cache.update({"docs": {}, "at": {}, "series": {}, "series_at": {}})
+    _ss.update({"prev": None, "samples": []})
 
 
 # ------------------------------------------------------------------ transport
@@ -173,6 +183,30 @@ def parse_engine(text):
         sums[name] = sums.get(name, 0.0) + number
         seen += 1
     return sums, model, seen
+
+
+def note_single_stream(counters, now=None) -> None:
+    """Record a single-stream decode sample, but only from an interval that finished ONE request.
+
+    Intervals are skipped rather than averaged in when they finished none (nothing to measure) or
+    two or more (that is aggregate throughput on a shared engine, which is NOT a per-stream rate --
+    conflating the two is what makes a busy engine look slow). A non-positive delta is a counter
+    reset, i.e. an engine restart, and is skipped too.
+    """
+    gen = counters.get("vllm:generation_tokens_total")
+    dec = counters.get("vllm:request_decode_time_seconds_sum")
+    cnt = counters.get("vllm:request_decode_time_seconds_count")
+    prev = _ss["prev"]
+    _ss["prev"] = (gen, dec, cnt, now)
+    if prev is None or None in (gen, dec, cnt) or None in prev[:3]:
+        return
+    if cnt - prev[2] != 1:
+        return
+    dgen, ddec = gen - prev[0], dec - prev[1]
+    if dgen <= 0 or ddec <= 0:
+        return
+    _ss["samples"].append(dgen / ddec)
+    del _ss["samples"][:-SS_MAXLEN]
 
 
 def _vector_value(payload):
@@ -404,6 +438,8 @@ def block(now=None, fetch=None, use_cache=True, window_s=1800, step_s=60):
         detail = "no metric series in the response" if no_metrics else f"{len(sums)} series"
     except Exception as exc:
         detail = type(exc).__name__
+    # The sampler reads the counters this call already parsed, so it costs no extra request.
+    note_single_stream(sums, now)
     # Emitted even when the engine did not answer, so the key set does not change under a
     # consumer that iterates it -- the VALUES are what goes missing, never the shape.
     for key, label, unit, metric, fmt in GAUGE_ITEMS:
@@ -451,7 +487,17 @@ def block(now=None, fetch=None, use_cache=True, window_s=1800, step_s=60):
     by_key = {it["key"]: it for it in items}
     items.append(_item("stream_tps", "tok/s per stream", "tok/s",
                        _ratio(by_key["output_tps"], by_key["running"]), "num2",
-                       "output rate / requests running, read now"))
+                       "engine-wide output rate / requests running, read now -- throughput shared "
+                       "across the streams in flight, not what one stream gets"))
+    # ...and what ONE stream gets, measured rather than divided. This is the number to read when
+    # the question is "how fast is a single request being served", which is what the operator asks
+    # for as "tok/s single stream". A dash means no interval in this process has yet finished
+    # exactly one request -- never a zero.
+    ss = sorted(_ss["samples"])
+    items.append(_item("ss_decode_tps", "Single-stream decode", "tok/s",
+                       (ss[len(ss) // 2] if ss else None), "num2",
+                       f"measured over the last {len(ss)} interval(s) in which exactly one request "
+                       "finished: tokens generated / that request's decode time"))
 
     doc = {
         "ok": bool((reachable and not no_metrics) or prom_ok),

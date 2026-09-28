@@ -8,7 +8,7 @@ Three views and one JSON surface, all served by a single stdlib HTTP server on p
 
 | path | what it is |
 |---|---|
-| `/` | now — engine load (every request, run or not, incl. last-generation recency), per-shape throughput, soak summary |
+| `/` | now — engine load (every request, run or not, incl. last-generation recency and a measured single-stream decode rate), per-shape throughput, soak summary |
 | `/history` | every banked run, ranked inside its own kit |
 | `/console` | switch engine, queue an eval, search HuggingFace and download a pack |
 | `/api/state` `/api/history` `/api/models` `/api/dispatch` `/api/live` | the JSON behind those pages |

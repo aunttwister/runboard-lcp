@@ -531,3 +531,70 @@ def test_a_recency_query_that_fails_degrades_only_the_two_recency_items():
     assert len(down) == 1 and down[0]["ok"] is False
     assert down[0]["detail"] == "OSError"
     assert set(items) == set(EM.ITEM_KEYS)
+
+
+# ------------------------------------------------------- what ONE stream actually gets
+
+def _engine_text(gen, dec, cnt, running=1):
+    """The engine's exposition text with the three counters the single-stream sampler needs."""
+    return (f'vllm:generation_tokens_total{{model_name="m"}} {gen}\n'
+            f'vllm:request_decode_time_seconds_sum{{model_name="m"}} {dec}\n'
+            f'vllm:request_decode_time_seconds_count{{model_name="m"}} {cnt}\n'
+            f'vllm:num_requests_running{{model_name="m"}} {running}\n').encode()
+
+
+def test_note_single_stream_only_records_intervals_that_finished_exactly_one_request():
+    EM.reset_cache()
+    EM.note_single_stream({"vllm:generation_tokens_total": 0.0,
+                           "vllm:request_decode_time_seconds_sum": 0.0,
+                           "vllm:request_decode_time_seconds_count": 0.0})
+    assert EM._ss["samples"] == []          # the first look primes the delta, it measures nothing
+    EM.note_single_stream({"vllm:generation_tokens_total": 100.0,
+                           "vllm:request_decode_time_seconds_sum": 2.0,
+                           "vllm:request_decode_time_seconds_count": 1.0})
+    assert EM._ss["samples"] == [50.0]      # exactly one finish: 100 tokens / 2 s of decode
+    EM.note_single_stream({"vllm:generation_tokens_total": 200.0,
+                           "vllm:request_decode_time_seconds_sum": 4.0,
+                           "vllm:request_decode_time_seconds_count": 3.0})
+    assert EM._ss["samples"] == [50.0]      # two finishes in one interval = shared, not one stream
+    EM.note_single_stream({"vllm:generation_tokens_total": 300.0,
+                           "vllm:request_decode_time_seconds_sum": 20.0,
+                           "vllm:request_decode_time_seconds_count": 4.0})
+    assert EM._ss["samples"] == [50.0, pytest.approx(100 / 16)]
+    EM.note_single_stream({"vllm:generation_tokens_total": 5.0,
+                           "vllm:request_decode_time_seconds_sum": 0.1,
+                           "vllm:request_decode_time_seconds_count": 1.0})
+    assert len(EM._ss["samples"]) == 2      # counters that went backwards = a restart, not a rate
+
+
+def test_note_single_stream_drops_the_oldest_sample_past_the_ring():
+    EM.reset_cache()
+    EM.note_single_stream({"vllm:generation_tokens_total": 0.0,
+                           "vllm:request_decode_time_seconds_sum": 0.0,
+                           "vllm:request_decode_time_seconds_count": 0.0})
+    for i in range(1, EM.SS_MAXLEN + 8):
+        EM.note_single_stream({"vllm:generation_tokens_total": float(i * 100),
+                               "vllm:request_decode_time_seconds_sum": float(i * 2),
+                               "vllm:request_decode_time_seconds_count": float(i)})
+    assert len(EM._ss["samples"]) == EM.SS_MAXLEN
+
+
+def test_note_single_stream_skips_a_restart_that_lands_mid_interval():
+    EM.reset_cache()
+    EM.note_single_stream({"vllm:generation_tokens_total": 500.0,
+                           "vllm:request_decode_time_seconds_sum": 10.0,
+                           "vllm:request_decode_time_seconds_count": 0.0})
+    EM.note_single_stream({"vllm:generation_tokens_total": 100.0,
+                           "vllm:request_decode_time_seconds_sum": 2.0,
+                           "vllm:request_decode_time_seconds_count": 1.0})
+    assert EM._ss["samples"] == []          # one finish, but the counters went backwards
+
+
+def test_single_stream_item_is_a_dash_until_one_interval_qualified():
+    doc = EM.block(now=1_700_000_000, fetch=route(engine=_engine_text(0, 0, 0)), use_cache=False)
+    item = {i["key"]: i for i in doc["items"]}["ss_decode_tps"]
+    assert item["value"] is None            # nothing measured yet: a dash, never a 0
+    doc = EM.block(now=1_700_000_030, fetch=route(engine=_engine_text(200, 4, 1)), use_cache=False)
+    item = {i["key"]: i for i in doc["items"]}["ss_decode_tps"]
+    assert item["value"] == pytest.approx(50.0)
+    assert "1 interval" in item["basis"]    # the sample count is stated, so 50 is not over-read
