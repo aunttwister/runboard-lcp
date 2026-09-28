@@ -56,6 +56,8 @@
     <h2>Engine load — every request, eval or not <span class="badge" id="eng-src">…</span></h2>
     <div class="kpis">
       <div class="kpi"><div class="v" id="k-eng-out">—</div><div class="l">output tok/s (whole engine)</div></div>
+      <div class="kpi"><div class="v" id="k-eng-last">—</div><div class="l">last generation</div></div>
+      <div class="kpi"><div class="v" id="k-eng-win">—</div><div class="l">tokens served (1 h)</div></div>
       <div class="kpi"><div class="v" id="k-eng-stream">—</div><div class="l">tok/s per stream</div></div>
       <div class="kpi"><div class="v" id="k-eng-pre">—</div><div class="l">prefill tok/s (finished reqs)</div></div>
       <div class="kpi"><div class="v" id="k-eng-dec">—</div><div class="l">decode tok/s (finished reqs)</div></div>
@@ -131,6 +133,15 @@
 "use strict";
 const $ = (id) => document.getElementById(id);
 let lastGood = null, lastLive = null, staleMark = false;
+
+// Ages, at the resolution each source can support: a soak state file that no soak has touched
+// for days must not read as "347325 s".
+function agoShort(s) {
+  if (s < 90) return Math.round(s) + " s";
+  if (s < 5400) return Math.round(s / 60) + " m";
+  if (s < 172800) return (s / 3600).toFixed(1) + " h";
+  return (s / 86400).toFixed(1) + " d";
+}
 
 function fmt(v, d) { return (v === null || v === undefined || Number.isNaN(v)) ? "—" : Number(v).toFixed(d === undefined ? 2 : d); }
 
@@ -273,7 +284,9 @@ function renderEngine(live) {
     const x = items[key];
     $(id).textContent = (x && x.value !== null && x.value !== undefined) ? String(x.value) : "\u2014";
   };
-  put("k-eng-out", "output_tps"); put("k-eng-stream", "stream_tps");
+  put("k-eng-out", "output_tps");
+  put("k-eng-last", "last_gen"); put("k-eng-win", "gen_win");
+  put("k-eng-stream", "stream_tps");
   put("k-eng-pre", "prefill_tps"); put("k-eng-dec", "decode_tps");
   put("k-eng-ttft", "ttft_p50"); put("k-eng-ttft95", "ttft_p95");
   put("k-eng-run", "running"); put("k-eng-wait", "waiting");
@@ -367,9 +380,20 @@ async function poll() {
     lastGood = st;
     const age = st.now_age_s;
     const b = $("age");
-    b.textContent = "state age " + (age === null || age === undefined ? "—" : age + " s");
-    staleMark = (age !== null && age !== undefined && age > 30);
-    b.className = "badge " + (staleMark ? "stale" : "live");
+    // This counts seconds since the LOAD-SOAK harness last wrote its state file
+    // (/root/load/run/state.json) -- not the engine's age, not this page's data age, not L1's.
+    // With no soak in flight that file is SUPPOSED to be days old, so yellowing it on age alone
+    // was a permanent false alarm: measured 2026-09-28 it read 347,325 s (4.0 d) yellow while the
+    // engine card beside it was live. It is yellow only while a soak IS running and its state has
+    // stopped advancing -- the one failure it can actually detect.
+    const soakRunning = !!(st.phase && st.phase !== "DONE");
+    b.textContent = "soak state " + (age === null || age === undefined ? "—" : agoShort(age)) +
+      (soakRunning ? "" : " (idle)");
+    staleMark = soakRunning && age !== null && age !== undefined && age > 30;
+    b.className = "badge " + (staleMark ? "stale" : (soakRunning ? "live" : ""));
+    b.title = "seconds since the load-soak harness last wrote its state file" +
+      " — not the engine's age" + (soakRunning ? "" : "; no soak is running, so an old" +
+      " stamp here is expected");
     render(st, lastLive);
   } catch (e) {
     $("feed").innerHTML = '<span class="err">feed error: ' + String(e) + "</span>" +

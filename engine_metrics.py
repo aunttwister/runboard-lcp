@@ -116,7 +116,7 @@ RATE_ITEMS = [
 # traffic" and is exactly the failure this card exists to avoid.
 ITEM_KEYS = (tuple(k for k, *_ in GAUGE_ITEMS)
              + tuple(k for k, *_ in RATE_ITEMS)
-             + ("stream_tps",))
+             + ("stream_tps", "gen_win", "last_gen"))
 
 SERIES = [
     ("output_tps", "output tok/s (engine-wide)"),
@@ -234,7 +234,56 @@ def on_grid(points, start, step, n):
     return out
 
 
+# Recency, from the COUNTER's own steps -- never from a rate. `rate(counter[2m])` is 0, not
+# absent, on an idle engine: it can say "nothing in the last two minutes" but it can never say
+# WHEN the engine last did anything. On 2026-09-28 that gap read as "the board has no data" while
+# a 40-minute generation was in flight, which is the exact confusion this card exists to prevent.
+RECENT_S = 3600               # an hour of steps answers "is it working now" without a second page
+RECENT_STEP_S = 30            # the scrape interval, so the reported age is one step accurate
+GEN_COUNTER_EXPR = "sum(vllm:generation_tokens_total)"
+
+
+def recent(now=None, fetch=None, window_s=RECENT_S, step_s=RECENT_STEP_S):
+    """(tokens produced in the window, seconds since the interval that produced them).
+
+    Counter steps are summed directly, negative steps dropped -- a restart inside the window
+    resets the counter, and the tokens served before it must not be lost or subtracted.
+    ``(0, None)`` is a real measurement ("the counter was scraped and never advanced"); ``None``
+    in either slot means the counter could not answer, which the page draws as a dash.
+    """
+    now = time.time() if now is None else now
+    pts = prom_range(GEN_COUNTER_EXPR, window_s=window_s, step_s=step_s, now=now, fetch=fetch)
+    if len(pts) < 2:                      # one sample cannot show a change, let alone when
+        return None, None
+    tokens = 0.0
+    last = None
+    prev = pts[0]["v"]
+    for p in pts[1:]:
+        step = p["v"] - prev
+        prev = p["v"]
+        if step <= 0:
+            continue
+        tokens += step
+        last = p["t"]
+    if last is None:
+        return 0, None
+    return int(round(tokens)), max(0, int(round(now - last)))
+
+
 # ------------------------------------------------------------------ assembly
+
+def _ago(seconds):
+    """A human age, at the resolution the counter behind it can support (30 s scrape steps).
+
+    "12 s ago" is a claim the 30 s grid can still make; "0.2 m ago" is not.
+    """
+    s = float(seconds)
+    if s < 90:
+        return f"{int(round(s))} s ago"
+    if s < 5400:
+        return f"{int(round(s / 60.0))} m ago"
+    return f"{s / 3600.0:.1f} h ago"
+
 
 def _fmt_val(value, fmt):
     """None (and anything non-finite) stays None: the page renders a dash, never a zero."""
@@ -254,6 +303,10 @@ def _fmt_val(value, fmt):
         return round(number, 2)
     if fmt == "pct":
         return round(number * 100.0, 1)
+    if fmt == "count":
+        return f"{int(round(number)):,}"
+    if fmt == "ago":
+        return _ago(number)
     return number
 
 
@@ -372,6 +425,20 @@ def block(now=None, fetch=None, use_cache=True, window_s=1800, step_s=60):
                 sources.append({"name": "prometheus", "url": PROM_URL, "ok": False,
                                 "detail": type(exc).__name__})
         items.append(_item(key, label, unit, raw, fmt, basis))
+    # ---- source 2b: the counter's own steps -- when it last generated, and how much
+    gen_win = last_gen = None
+    if prom_ok:
+        try:
+            gen_win, last_gen = recent(now=now, fetch=fetch)
+        except Exception as exc:
+            prom_ok = False
+            sources.append({"name": "prometheus", "url": PROM_URL, "ok": False,
+                            "detail": type(exc).__name__})
+    items.append(_item("gen_win", "Tokens (1 h)", "tok", gen_win, "count",
+                       "counter increase over the last hour, measured -- 0 means it really "
+                       "served none, a dash means the counter could not be read"))
+    items.append(_item("last_gen", "Last generation", "", last_gen, "ago",
+                       "time since the last 30 s interval in which output tokens appeared"))
     if prom_ok:
         sources.append({"name": "prometheus", "url": PROM_URL, "ok": True,
                         "detail": f"{answered} instant queries, job {PROM_JOB}"})

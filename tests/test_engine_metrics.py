@@ -462,3 +462,72 @@ def test_http_get_sets_a_user_agent_and_reads_bytes(monkeypatch):
     assert seen["url"] == "http://x/metrics"
     assert seen["ua"] == "zgx-engine-load/1"
     assert seen["timeout"] == EM.TIMEOUT
+
+
+# ------------------------------------------------------------------ recency: counter, not rate
+#
+# The card must be able to answer "when did this box last DO anything" -- the question the board
+# failed on 2026-09-28 while a 40-minute generation was in flight: every 2 m rate read 0/dash and
+# the operator read that as "no data". Rates cannot answer it (a rate is 0, not absent, when the
+# engine is idle); the counter's own steps can.
+
+def _counter(values, t0=1_700_000_000, step=30):
+    return [[t0 + i * step, str(v)] for i, v in enumerate(values)]
+
+
+def test_recent_reports_the_total_served_and_the_age_of_the_last_step_that_served():
+    now = 1_700_000_000.0
+    pts = _counter([1000, 1400, 1400, 1400], t0=int(now) - 90)
+    tokens, age = EM.recent(now=now, fetch=route(range_points=pts))
+    assert tokens == 400, "the served total must be the sum of the counter's positive steps"
+    assert age == 60, "the age must point at the step that produced the tokens, not at now"
+
+
+def test_recent_of_a_counter_that_never_moved_is_a_measured_zero_and_no_age():
+    now = 1_700_000_000.0
+    pts = _counter([500, 500, 500], t0=int(now) - 60)
+    assert EM.recent(now=now, fetch=route(range_points=pts)) == (0, None)
+
+
+def test_recent_drops_a_counter_reset_instead_of_subtracting_the_restart():
+    """A restart mid-window resets the counter; the tokens served before it still happened."""
+    now = 1_700_000_000.0
+    pts = _counter([5000, 600, 1000, 1500], t0=int(now) - 90)
+    tokens, age = EM.recent(now=now, fetch=route(range_points=pts))
+    assert tokens == 900, "the reset step must be dropped, not counted as negative"
+    assert age == 0, "the token served in the newest step is the newest token there is"
+
+
+def test_recent_of_a_single_sample_claims_nothing():
+    now = 1_700_000_000.0
+    assert EM.recent(now=now, fetch=route(range_points=_counter([900], t0=int(now)))) == (None, None)
+
+
+def test_the_recency_items_are_published_and_dashed_when_prometheus_is_down():
+    b = EM.block(fetch=route(prom_err=OSError("prometheus down")), use_cache=False)
+    items = {i["key"]: i for i in b["items"]}
+    assert set(items) == set(EM.ITEM_KEYS)
+    assert items["gen_win"]["value"] is None and items["last_gen"]["value"] is None
+    down = [s for s in b["sources"] if s["name"] == "prometheus"]
+    assert down and down[0]["ok"] is False
+
+
+def test_a_measured_zero_is_printed_as_zero_and_never_as_a_dash():
+    """0 tokens with the counter readable is a measurement; a dash would read as "unreadable"."""
+    assert EM._fmt_val(0, "count") == "0"
+    assert EM._fmt_val(None, "count") is None
+    assert EM._fmt_val(300, "ago") == "5 m ago"
+    assert EM._fmt_val(12, "ago") == "12 s ago"
+    assert EM._fmt_val(7200, "ago") == "2.0 h ago"
+
+
+def test_a_recency_query_that_fails_degrades_only_the_two_recency_items():
+    """The range query is one more request to the same source; its failure is not an exception
+    the card may swallow -- the two items go to dashes and the source block says why."""
+    b = EM.block(fetch=route(range_err=OSError("query_range failed")), use_cache=False)
+    items = {i["key"]: i for i in b["items"]}
+    assert items["gen_win"]["value"] is None and items["last_gen"]["value"] is None
+    down = [s for s in b["sources"] if s["name"] == "prometheus"]
+    assert len(down) == 1 and down[0]["ok"] is False
+    assert down[0]["detail"] == "OSError"
+    assert set(items) == set(EM.ITEM_KEYS)
