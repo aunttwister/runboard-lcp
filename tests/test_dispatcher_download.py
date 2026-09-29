@@ -21,12 +21,16 @@ def st(load_tree):
 
 
 def _dl_env(monkeypatch, rc=0, lines=("Fetching 12 files: 42%",), polls=2,
-            never_exits=False, time_step=0.0):
+            never_exits=False, time_step=0.0, downloaded_gb=42.5):
     monkeypatch.setattr(dispatcher.subprocess, "Popen",
                         fake_popen(rc=rc, lines=lines, polls_before_exit=polls,
                                    never_exits=never_exits))
     monkeypatch.setattr(dispatcher, "time", FakeTime(step=time_step))
     monkeypatch.setattr(dispatcher, "run", lambda *a, **k: (0, "", ""))
+    # Progress is measured on the DISK now, so the walk is what a test controls. Stubbing
+    # it here keeps every download test's progress line deterministic (and keeps the
+    # hermetic guard happy -- no du, no stat of a real pack).
+    monkeypatch.setattr(C, "dir_gb", lambda path: downloaded_gb)
     # the sandbox volume is tiny; the disk gate itself is covered in test_console_core
     monkeypatch.setattr(C, "disk_free_gb", lambda path=None: 5000.0)
 
@@ -58,7 +62,11 @@ def test_do_download_runs_hf_with_a_revision_and_reports_progress(monkeypatch, s
     assert result["rc"] == 0 and result["repo"] == "owner/name"
     assert result["revision"] == "3.05bpw"
     assert result["free_gb_after"] > 0
-    assert status_doc()["percent"] == "37"          # last percentage seen in the log
+    # 42.5 GB of an expected 85 GB. The log's own "37%" is a per-FILE progress bar and is
+    # deliberately not what this reports -- see
+    # test_do_download_progress_comes_from_the_disk_not_the_log.
+    assert status_doc()["percent"] == "50%"
+    assert status_doc()["downloaded_gb"] == 42.5
     assert any("(anonymous)" in line for line in st.logs)
     assert any("download rc=0" in line for line in st.logs)
     assert any("fetching done" in line for line in st.logs)
@@ -67,14 +75,56 @@ def test_do_download_runs_hf_with_a_revision_and_reports_progress(monkeypatch, s
 def test_do_download_without_a_revision_and_with_a_token(monkeypatch, st):
     make_hf_cli(monkeypatch)
     (C.LOAD / "hf.token").write_text("hf_secret\n")
-    _dl_env(monkeypatch, lines=("no percentage here",))
+    _dl_env(monkeypatch, lines=("no percentage here",), downloaded_gb=5.0)
     dispatcher.do_download({"job_id": "d3", "repo": "owner/name", "expected_gb": 10}, st)
     proc = dispatcher.subprocess.Popen.instances[0]
     assert proc.args == ["/root/dlvenv/bin/hf", "download", "owner/name"]
     assert proc.kwargs["env"]["HF_TOKEN"] == "hf_secret"
     assert proc.kwargs["env"]["HUGGING_FACE_HUB_TOKEN"] == "hf_secret"
-    assert status_doc()["percent"] is None          # no percentage found, not "0"
+    # This job's log carried no percentage at all. That used to make the reading None;
+    # it is now irrelevant, because the number comes from the disk (5 of 10 GB).
+    assert status_doc()["percent"] == "50%"
     assert any("(authenticated)" in line for line in st.logs)
+
+
+def test_do_download_progress_comes_from_the_disk_not_the_log(monkeypatch, st):
+    """The regression guard: a per-file percentage must never become the job's progress.
+
+    ``hf download`` prints a bar per file, so the last "NN%" in its log is whichever small
+    file finished most recently. On 2026-09-29 that read "20%" for a 113 GB pack that was
+    7.8 GB in, and it was relayed to the operator as progress.
+    """
+    make_hf_cli(monkeypatch)
+    _dl_env(monkeypatch, lines=("Fetching 35 files: 97%", "Downloading shard-19: 99%"),
+            downloaded_gb=5.7)
+    dispatcher.do_download({"job_id": "d7", "repo": "owner/name", "expected_gb": 113.3}, st)
+
+    doc = status_doc()
+    assert doc["percent"] == "5%"          # 5.7 / 113.3, not the 97 or 99 in the log
+    assert doc["downloaded_gb"] == 5.7
+    assert doc["expected_gb"] == 113.3
+
+
+def test_do_download_admits_it_does_not_know_the_progress_yet(monkeypatch, st):
+    make_hf_cli(monkeypatch)
+    _dl_env(monkeypatch, downloaded_gb=None)      # nothing has landed on disk
+    dispatcher.do_download({"job_id": "d8", "repo": "owner/name", "expected_gb": 113.3}, st)
+
+    doc = status_doc()
+    assert doc["percent"] is None          # unknown, and NOT a fabricated "0%"
+    assert doc["downloaded_gb"] is None
+
+
+def test_do_download_leaves_a_throughput_record_in_the_job_log(monkeypatch, st):
+    """status.json only ever holds 'now'; a slow download must be diagnosable afterwards."""
+    make_hf_cli(monkeypatch)
+    _dl_env(monkeypatch, polls=25, time_step=15.0, downloaded_gb=10.0)
+    dispatcher.do_download({"job_id": "d10", "repo": "owner/name", "expected_gb": 100}, st)
+
+    # Status.log prefixes each line with a UTC stamp, so match on the body.
+    progress = [line for line in st.logs if "progress:" in line]
+    assert progress, "no periodic throughput line was logged"
+    assert "10.0 GB / 100 GB (10%)" in progress[0]
 
 
 def test_do_download_falls_through_to_the_second_hf_candidate(monkeypatch, st):

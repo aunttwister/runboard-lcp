@@ -364,6 +364,9 @@ function renderJob(d) {
     ["queued", dash(d.queue_depth)],
     ["elapsed s", dash(st.elapsed_s)],
     ["percent", dash(st.percent)],
+    ["downloaded", st.downloaded_gb == null
+        ? "&mdash;"
+        : esc(st.downloaded_gb) + (st.expected_gb ? " / " + esc(st.expected_gb) + " GB" : " GB")],
     ["before", dash((st.previous_engine || {}).target) + " " + dash((st.previous_engine || {}).engine_build)],
     ["restored to", (st.restored_to ? (st.restored_to.ok ? '<span class="ok">' : '<span class="bad">')
                        + dash(st.restored_to.target) + "</span>" : "&mdash;")],

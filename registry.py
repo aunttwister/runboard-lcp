@@ -20,7 +20,9 @@ import console_core as C
 # The catalogue of things this box can actually put on :18300. Not a wish list:
 # each entry has a launch path that exists.
 # Where the model packs actually live. Overridable so a checkout can point at a tmp tree.
-HF_CACHE = Path(os.environ.get("RUNBOARD_HF_CACHE", "/root/.cache/huggingface/hub"))
+# One definition, in the shared core -- the dispatcher measures a running download against
+# the same path, so this may not be a second copy of the rule.
+HF_CACHE = C.HF_CACHE
 
 # Where the vLLM venv keeps its distributions. Used only to read a version off a
 # directory name -- see _dist_version for why this must never import the plugin.
@@ -137,31 +139,14 @@ def _run(cmd: list[str], timeout: int = 20) -> str:
 
 
 def _dir_gb(path: str) -> float | None:
-    """Size of a pack on disk, following symlinks and counting each blob once.
+    """Size of a pack on disk -- a thin alias for the shared walk in console_core.
 
-    HuggingFace stores a revision as symlinks into ../../blobs/, so a walker that skips
-    symlinks reports 0 GB for every pack (which is how this shipped the first time and
-    put a column of zeros on the page -- a zero in a size column is indistinguishable
-    from a real measurement, so it must never be produced for 'cannot measure').
+    Kept as a name because the models JSON builder and its tests call it here, but the
+    rules (follow symlinks into blobs, count a shared blob once, never turn 'cannot
+    measure' into a 0) now live in ONE place, because the dispatcher needs the same answer
+    about a directory that is still being written to.
     """
-    seen: set = set()
-    total = 0
-    try:
-        for p in Path(path).rglob("*"):
-            try:
-                if p.is_dir() and not p.is_symlink():
-                    continue
-                st = p.stat()          # follows the symlink to the blob
-                key = (st.st_dev, st.st_ino)
-                if key in seen:
-                    continue           # several revisions share one blob
-                seen.add(key)
-                total += st.st_size
-            except Exception:
-                continue
-        return round(total / 1e9, 1) or None
-    except Exception:
-        return None
+    return C.dir_gb(path)
 
 
 def _dist_version(name: str) -> str | None:

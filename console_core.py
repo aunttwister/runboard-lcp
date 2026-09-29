@@ -35,6 +35,72 @@ MODELS = LOAD / "models.json"
 
 ROOT_ACCESS = "root-only, 0600"
 
+# Where the model packs live. One definition, shared on purpose: registry.py sizes a pack
+# from here and the dispatcher measures a RUNNING download against it, so the two cannot
+# disagree about which directory a repo name maps to. Overridable so a checkout -- and the
+# test suite -- can point at a tmp tree.
+HF_CACHE = Path(os.environ.get("RUNBOARD_HF_CACHE", "/root/.cache/huggingface/hub"))
+
+
+def repo_cache_dir(repo: str) -> Path:
+    """The hub directory that ``hf download <repo>`` writes into."""
+    return HF_CACHE / ("models--" + str(repo).replace("/", "--"))
+
+
+def dir_gb(path: str | Path) -> float | None:
+    """Size of a tree on disk in GB, following symlinks and counting each blob once.
+
+    HuggingFace stores a revision as symlinks into ../../blobs/, so a walker that skips
+    symlinks reports 0 GB for every pack (which is how this shipped the first time and
+    put a column of zeros on the page -- a zero in a size column is indistinguishable
+    from a real measurement, so it must never be produced for 'cannot measure').
+
+    Lives here rather than in registry.py because the dispatcher has to measure a running
+    download with exactly these rules; registry._dir_gb is the thin alias it kept.
+    """
+    seen: set = set()
+    total = 0
+    try:
+        for p in Path(path).rglob("*"):
+            try:
+                if p.is_dir() and not p.is_symlink():
+                    continue
+                st = p.stat()          # follows the symlink to the blob
+                key = (st.st_dev, st.st_ino)
+                if key in seen:
+                    continue           # several revisions share one blob
+                seen.add(key)
+                total += st.st_size
+            except Exception:
+                continue
+        return round(total / 1e9, 1) or None
+    except Exception:
+        return None
+
+
+def download_progress(repo: str, expected_gb: float | None = None) -> dict:
+    """How far a download has actually got, measured in BYTES on disk.
+
+    WHY THIS EXISTS. The console used to take the last ``NN%`` it could find in the
+    ``hf download`` log. That number is a PER-FILE progress bar, so a 113 GB pack of 35
+    files read "20%" for hours while the seven small files finished and the twenty-two
+    large shards had not started -- a number that looks like progress, is not, and was
+    read as one. (Measured 2026-09-29: status.json said 20% at 7.8 GB of 113.2 GB.)
+
+    Progress is a fact about the disk, so read the disk. ``percent`` is None -- not 0 and
+    not a guess -- whenever the total is unknown or nothing has landed yet, because a
+    fabricated 0% and a real 0% are indistinguishable on the page.
+    """
+    gb = dir_gb(repo_cache_dir(repo))
+    out: dict = {"downloaded_gb": gb, "expected_gb": expected_gb, "percent": None}
+    if gb is not None and expected_gb:
+        try:
+            out["percent"] = f"{gb / float(expected_gb) * 100:.0f}%"
+        except (TypeError, ValueError, ZeroDivisionError):
+            pass
+    return out
+
+
 # Presets are FIXED. Every one of them either is, or is a directed subset of, the
 # frozen Q200v2 text-180 kit, graded by that kit's own graders. A preset is its own
 # kit: smoke-20 and kit-180 must never be ranked against each other, so the run id

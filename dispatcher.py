@@ -365,6 +365,7 @@ def do_download(job, st: Status) -> dict:
     st.set(phase="download")
     st.log("cmd: " + " ".join(cmd) + (" (authenticated)" if tok else " (anonymous)"))
     t0 = time.time()
+    ticks = 0
     with log.open("w") as fh:
         proc = subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT, env=env)
         while proc.poll() is None:
@@ -372,14 +373,24 @@ def do_download(job, st: Status) -> dict:
                 proc.kill()
                 raise RuntimeError("download exceeded 4 h")
             time.sleep(15)
-            pct = None
-            for line in reversed(log_tail(log, 40)):
-                m = re.findall(r"(\d{1,3})%", line)
-                if m:
-                    pct = m[-1]
-                    break
+            ticks += 1
+            # Progress is measured on the DISK, never scraped off the log. `hf download`
+            # prints a per-FILE bar, so the last "NN%" in the log is the small file that
+            # happens to be last -- a 113 GB/35-file pack sat at "20%" for hours while the
+            # shards had not started. See console_core.download_progress.
+            prog = C.download_progress(repo, job.get("expected_gb"))
             st.set(phase="download", elapsed_s=round(time.time() - t0, 1),
-                   percent=pct, free_gb=round(C.disk_free_gb(), 1))
+                   free_gb=round(C.disk_free_gb(), 1), **prog)
+            # Every 5 minutes, leave a throughput record in the job log: the status doc holds
+            # only "now", so without this a download that ran at 2 MB/s for six hours cannot
+            # be told apart afterwards from one that ran at 28 MB/s.
+            if ticks % 20 == 0:
+                elapsed = time.time() - t0
+                where = (f"{prog['downloaded_gb']} GB / {prog['expected_gb']} GB "
+                         f"({prog['percent']})" if prog["expected_gb"]
+                         else f"{prog['downloaded_gb']} GB ({prog['percent']})")
+                rate = (prog["downloaded_gb"] / elapsed * 1000) if (prog["downloaded_gb"] and elapsed) else 0
+                st.log(f"progress: {where} after {elapsed:.0f}s (~{rate:.1f} MB/s)")
     rc = proc.returncode
     st.log(f"download rc={rc} after {time.time() - t0:.0f}s")
     for line in log_tail(log, 6):
