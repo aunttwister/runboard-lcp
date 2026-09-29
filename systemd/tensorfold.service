@@ -1,0 +1,36 @@
+[Unit]
+Description=Qwen3.8-Flash-Next on TensorFold v0.3.6.3, single DGX Spark (serves :18300)
+Documentation=https://github.com/MiaAI-Lab/Qwen3.8-Flash-Next-Single-DGX-Spark-TensorFold
+After=network-online.target
+Wants=network-online.target
+# Restart-loop guard. These two keys are SILENTLY IGNORED under [Service] -- only [Unit]
+# counts -- and a guard in the wrong section is decoration (systemd-analyze verify says so).
+StartLimitIntervalSec=600
+StartLimitBurst=3
+
+[Service]
+Type=simple
+WorkingDirectory=/root/tensorfold-qwen38
+# PORT=18300 so this engine is interchangeable with every other engine on the box: the
+# console's switch/restore machinery, the eval runners and the health probes all speak to
+# :18300, and the recipe's own default (8888) would put it outside all of that.
+# FOREGROUND=1 is the recipe's documented systemd mode: start.sh stays attached to the
+# container's log and exits with its exit code, and its INT/TERM trap runs ./stop.sh, so
+# `systemctl stop` frees the GPU memory instead of leaking a container.
+# PREPARE=0 because scripts/prepare.sh is run deliberately (image + checkpoint verified)
+# before this unit is ever started; a start must then fail loudly and fast if something is
+# missing rather than silently launching a multi-minute download inside a service start.
+Environment=PORT=18300
+Environment=FOREGROUND=1
+Environment=PREPARE=0
+ExecStart=/bin/bash /root/tensorfold-qwen38/start.sh restart
+# TensorFold gets its own 30s container stop plus the load/unload overhead; systemd must
+# not SIGKILL the trap before stop.sh has removed the container and freed the GPU.
+TimeoutStopSec=180
+Restart=on-failure
+RestartSec=30
+StandardOutput=append:/root/tensorfold.log
+StandardError=append:/root/tensorfold.log
+
+[Install]
+WantedBy=multi-user.target

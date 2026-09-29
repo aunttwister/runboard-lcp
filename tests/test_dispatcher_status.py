@@ -209,6 +209,8 @@ def _patch_urlopen(monkeypatch, payload=None, error=None):
     import urllib.request
 
     def fake(req, timeout=None):
+        if _SENT is not None:
+            _SENT.append(json.loads(req.data.decode()))
         if error:
             raise error
         return _Resp(json.dumps(payload).encode())
@@ -216,22 +218,71 @@ def _patch_urlopen(monkeypatch, payload=None, error=None):
     monkeypatch.setattr(urllib.request, "urlopen", fake)
 
 
+_SENT = None
+
+
+def _patch_live_engine(monkeypatch, model_id="qwen38-flash-next-exl3", capture=None):
+    """Answer the engine lookup the probe makes, without shelling out.
+
+    probe_generation asks the RUNNING engine for its own model id, so it must be stubbed
+    here: registry.live_engine really does run systemctl/docker/curl, and the hermetic
+    guard in conftest fails any test that spawns a process.
+    """
+    global _SENT
+    _SENT = capture
+    monkeypatch.setattr(dispatcher, "live_engine",
+                        lambda: {"target": "cruz", "model_id": model_id})
+
+
 def test_probe_generation_asks_the_model_to_actually_generate(monkeypatch):
+    _patch_live_engine(monkeypatch)
     _patch_urlopen(monkeypatch, {"choices": [{"message": {"content": "pong"}}]})
     ok, why = dispatcher.probe_generation()
     assert ok is True and "pong" in why and "generated 4 chars" in why
 
 
 def test_probe_generation_treats_an_empty_answer_as_an_answer(monkeypatch):
+    _patch_live_engine(monkeypatch)
     _patch_urlopen(monkeypatch, {"choices": [{"message": {"content": None}}]})
     ok, why = dispatcher.probe_generation()
     assert ok is True and "generated 0 chars" in why
 
 
 def test_probe_generation_reports_a_wedged_server(monkeypatch):
+    _patch_live_engine(monkeypatch)
     _patch_urlopen(monkeypatch, error=OSError("connection refused"))
     ok, why = dispatcher.probe_generation()
     assert ok is False and why.startswith("OSError")
+
+
+def test_probe_generation_asks_the_running_engine_for_its_own_id(monkeypatch):
+    """The model id used to be a literal -- "qwen38-flash-next-exl3" -- for every engine.
+
+    The vLLM engine tolerates being called by the wrong name, so this stayed invisible;
+    TensorFold serves ``Qwen3.8-Flash-Next`` and answers a request for another id with a
+    404, which would have read as "the engine failed to come up" and triggered a restore.
+    """
+    sent: list = []
+    _patch_live_engine(monkeypatch, "Qwen3.8-Flash-Next", capture=sent)
+    _patch_urlopen(monkeypatch, {"choices": [{"message": {"content": "pong"}}]})
+
+    ok, _ = dispatcher.probe_generation()
+    assert ok is True
+    assert sent[0]["model"] == "Qwen3.8-Flash-Next"
+
+
+def test_probe_generation_falls_back_when_the_engine_will_not_say(monkeypatch):
+    """Nothing to read the id from (registry unreachable) -> the documented literal."""
+    global _SENT
+    sent: list = []
+    _SENT = sent
+    monkeypatch.setattr(dispatcher, "live_engine",
+                        lambda: {"target": "unknown", "error": "no registry"})
+    _patch_urlopen(monkeypatch, {"choices": [{"message": {"content": "pong"}}]})
+
+    ok, _ = dispatcher.probe_generation()
+    assert ok is True
+    assert sent[0]["model"] == "qwen38-flash-next-exl3"   # the documented fallback
 
 
 def test_log_tail_reads_the_last_lines(load_tree, tmp_path):

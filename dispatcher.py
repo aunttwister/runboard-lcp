@@ -172,8 +172,13 @@ def probe_generation(timeout=180) -> tuple[bool, str]:
     """A health check that only asks /v1/models will pass on a wedged server. Ask it
     to actually generate."""
     import urllib.request
+    # Ask the running engine for its own model id instead of naming one engine's id at
+    # every engine. The literal here was "qwen38-flash-next-exl3", which the vLLM engine
+    # tolerates but which is not what this box serves on every engine, and is not what
+    # TensorFold serves at all ("Qwen3.8-Flash-Next").
+    model = (live_engine() or {}).get("model_id") or "qwen38-flash-next-exl3"
     body = json.dumps({
-        "model": "qwen38-flash-next-exl3",
+        "model": model,
         "messages": [{"role": "user", "content": "Reply with exactly one word: pong"}],
         "max_tokens": 8, "temperature": 0,
         "chat_template_kwargs": {"enable_thinking": False, "thinking": False},
@@ -212,7 +217,10 @@ def do_switch(job, st: Status) -> None:
         return
     st.set(phase="switch")
     st.log(f"switching :{PORT} to {want} (serve.sh {target})")
-    rc, out, err = run([SERVE, target], timeout=1200)
+    # 2700s, not 1200: a warm engine loads in ~2.5 min, but the first start of an engine
+    # that must still compile its kernels for GB10 (TensorFold) takes minutes longer.
+    # Killing serve.sh mid-load would then look like a failed switch and trip a restore.
+    rc, out, err = run([SERVE, target], timeout=2700)
     for line in (out or "").splitlines()[-12:]:
         st.log("  " + line)
     if rc != 0:
@@ -229,6 +237,9 @@ def do_eval(job, st: Status, run_id: str) -> dict:
     log = C.LOGDIR / f"{run_id}.log"
     log.parent.mkdir(parents=True, exist_ok=True)
     model_id = (live_engine() or {}).get("model_id") or "qwen38-flash-next-exl3"
+    # Concurrent streams. Only the frozen runner multiplexes; console_core.validate_job
+    # has already refused workers>1 on a serial preset, so this cannot silently downscope.
+    workers = int(job.get("workers", C.DEFAULT_WORKERS.get(preset["runner"], 1)))
 
     if preset["runner"] == "lite":
         cmd = [sys.executable, C.RUNNER_LITE, "--base-url", BASE_URL,
@@ -243,7 +254,7 @@ def do_eval(job, st: Status, run_id: str) -> dict:
                         "quality-text-180-v2.jsonl",
                "--model", model_id,
                "--max-tokens", str(preset["max_tokens"]), "--timeout", "1800",
-               "--workers", "2", "--human-eval-timeout", "12",
+               "--workers", str(workers), "--human-eval-timeout", "12",
                "--image-id", C.SANDBOX_IMAGE,
                "--profile-id", "console-dispatch",
                "--candidate-id", run_id,
@@ -253,7 +264,8 @@ def do_eval(job, st: Status, run_id: str) -> dict:
 
     timeout = JOB_TIMEOUT.get(job["preset"], DEFAULT_TIMEOUT)
     st.set(phase="eval")
-    st.log(f"running preset {job['preset']} as {run_id} (timeout {timeout}s)")
+    st.log(f"running preset {job['preset']} as {run_id} on {model_id} "
+           f"({workers} concurrent stream(s), timeout {timeout}s)")
     st.log("cmd: " + " ".join(str(c) for c in cmd))
     t0 = time.time()
     with log.open("w") as fh:
@@ -284,6 +296,7 @@ def do_eval(job, st: Status, run_id: str) -> dict:
     st.log(f"preset finished rc={rc} after {time.time() - t0:.0f}s")
 
     result = {"run_id": run_id, "preset": job["preset"], "rc": rc,
+              "engine": job.get("engine", "current"), "workers": workers,
               "killed_by_timeout": killed, "log": str(log)}
     summary = C.RUNS_DIR / run_id / "summary.json"
     if summary.exists():
@@ -474,7 +487,7 @@ def main() -> int:
             target = C.ENGINES[job["engine"]]["switch"]
             st.set(phase="serve")
             st.log(f"explicit switch to {job['engine']} (serve.sh {target})")
-            rc, out, err = run([SERVE, target], timeout=1200)
+            rc, out, err = run([SERVE, target], timeout=2700)
             for line in (out or "").splitlines()[-12:]:
                 st.log("  " + line)
             if rc != 0:
@@ -518,7 +531,7 @@ def main() -> int:
             elif want and switch_value_for(cur) != want:
                 st.set(phase="restore", restoring_to=C.BASELINE)
                 st.log(f"restoring baseline: {C.BASELINE} (was serving {cur or 'unknown'})")
-                rc, out, _ = run([SERVE, want], timeout=1200)
+                rc, out, _ = run([SERVE, want], timeout=2700)
                 st.set(restored_to={"target": C.BASELINE, "rc": rc, "ok": rc == 0,
                                     "previous": prev.get("target")},
                        off_baseline=(rc != 0))

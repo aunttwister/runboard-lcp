@@ -91,7 +91,18 @@ ENGINES: dict[str, dict] = {
     "cruz": {"label": "Cruz fork + 3.05bpw (exllamav3)", "switch": "cruz"},
     "exl3": {"label": "stock exllamav3 + 2.50bpw", "switch": "exl3"},
     "vllm": {"label": "vLLM prod (NVFP4 + abliterated)", "switch": "vllm"},
+    "tensorfold": {"label": "TensorFold v0.3.6.3 + MLX 4-bit MTP", "switch": "tensorfold"},
 }
+
+# Concurrent streams for an eval. The frozen runner multiplexes requests and states its
+# own ceiling -- "workers must be between 1 and 4 for the frozen production profile" --
+# so 4 is the most this box can ask for. The lite runner is serial by construction.
+MAX_WORKERS = 4
+# Per-runner defaults, and they differ: the dispatcher ran the frozen kit with --workers 2
+# and the lite kit serially, so a single default of 2 would have refused every lite-preset
+# job (smoke-20, quick-60, kit-140) the moment workers became a validated job field --
+# i.e. it would have broken the console's ordinary evals while looking like a new check.
+DEFAULT_WORKERS = {"frozen": 2, "lite": 1}
 
 # The one engine this box is expected to be serving when nothing else is running.
 # Every eval restores it afterwards, whatever engine the eval ran on, so the box
@@ -216,6 +227,18 @@ def validate_job(job) -> tuple[bool, str]:
             return False, f"unknown preset {job.get('preset')!r} (have {sorted(PRESETS)})"
         if job.get("engine", "current") not in ENGINES:
             return False, f"unknown engine {job.get('engine')!r} (have {sorted(ENGINES)})"
+        # Refuse a request for concurrent streams that the chosen runner cannot deliver,
+        # rather than accepting it and quietly running serial: a downscoped measurement
+        # still publishes a number, and a number labelled "4 streams" that was measured
+        # at 1 is a lie the history page would repeat forever.
+        runner = PRESETS[job["preset"]]["runner"]
+        workers = job.get("workers", DEFAULT_WORKERS.get(runner, 1))
+        if isinstance(workers, bool) or not isinstance(workers, int) \
+                or not 1 <= workers <= MAX_WORKERS:
+            return False, f"workers must be an integer 1..{MAX_WORKERS} (got {workers!r})"
+        if workers > 1 and runner != "frozen":
+            return False, (f"workers={workers} needs a frozen preset -- the lite runner is "
+                           f"serial, so {job['preset']!r} cannot carry concurrent streams")
     else:
         repo = job.get("repo")
         if not isinstance(repo, str) or "/" not in repo:

@@ -101,6 +101,28 @@ CATALOGUE = [
                    "prefill_s": 1.88, "e2e_tok_s": 45.49},
         "default": False,
     },
+    {
+        "id": "tensorfold",
+        "label": "TensorFold v0.3.6.3 + MLX 4-bit",
+        "base_model": "Qwen3.8-Flash-Next",
+        "engine": "TensorFold v0.3.6.3 (patched, CUDA/GB10)",
+        "pack": "Vontra/Qwen3.8-Flash-Next-MLX-4bit-MTP",
+        "revision": "dadefa8066e3be900a0d148d0f5a2f4eb1cf6534",
+        "path": str(HF_CACHE / "models--Vontra--Qwen3.8-Flash-Next-MLX-4bit-MTP"
+                    / "snapshots/dadefa8066e3be900a0d148d0f5a2f4eb1cf6534"),
+        # The recipe's own start.sh, wrapped in a systemd unit, serving :18300 like every
+        # other engine so the console's switch/restore machinery needs no special case.
+        # The unit is `tensorfold.service`; it carries no exllamav3 extension, so
+        # live_engine() names it through the unit probe and _vllm_build() is not reached.
+        # banked is deliberately empty: nothing has been measured on this engine yet, and
+        # an invented row in the "what it measured last time" column is worse than a dash.
+        "kind": "unit",
+        "unit": "tensorfold.service",
+        "switch": "tensorfold",
+        "model_id": "Qwen3.8-Flash-Next",
+        "banked": {},
+        "default": False,
+    },
 ]
 
 PORT = 18300

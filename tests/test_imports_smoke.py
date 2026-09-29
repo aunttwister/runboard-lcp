@@ -53,7 +53,7 @@ def test_registry_catalogue_ids():
     import registry
 
     assert [e["id"] for e in registry.CATALOGUE] == [
-        "cruz", "vllm-cruz", "exl3-2.5bpw", "vllm-prod"]
+        "cruz", "vllm-cruz", "exl3-2.5bpw", "vllm-prod", "tensorfold"]
     default = [e for e in registry.CATALOGUE if e.get("default")]
     assert len(default) == 1, "exactly one catalogue entry must be the default"
     assert default[0]["id"] == "vllm-cruz"

@@ -107,10 +107,41 @@ def test_validate_job_refuses_a_download_that_fails_the_disk_gate(monkeypatch):
     {"action": "eval", "preset": "kit-180", "engine": "exl3"},
     {"action": "serve", "engine": "vllm"},
     {"action": "download", "repo": "owner/name", "expected_gb": 10.0},
+    # concurrency is opt-in and the default must stay legal for every preset
+    {"action": "eval", "preset": "smoke-20", "workers": 1},
+    {"action": "eval", "preset": "kit-180", "workers": 1},
+    {"action": "eval", "preset": "kit-180", "workers": 4},
 ])
 def test_validate_job_accepts_every_legal_shape(monkeypatch, job):
     _free(monkeypatch, 5000.0)
     assert C.validate_job(job) == (True, "ok")
+
+
+# ---------------------------------------------------------------- concurrent streams
+
+def test_workers_is_refused_on_a_preset_whose_runner_cannot_multiplex():
+    """A number labelled "4 streams" that was measured serially is a lie the page repeats.
+
+    Only the frozen kit runner multiplexes; q200_lite has no concurrency at all, so a
+    workers=2 on a lite preset is refused here rather than accepted and run at 1.
+    """
+    ok, why = C.validate_job({"action": "eval", "preset": "smoke-20", "workers": 2})
+    assert ok is False
+    assert "frozen" in why and "smoke-20" in why
+
+
+@pytest.mark.parametrize("workers", [0, 5, -1, 1.5, True, "4"])
+def test_workers_must_be_an_integer_in_range(workers):
+    # note True: isinstance(True, int) is True in Python, hence the explicit bool guard
+    ok, why = C.validate_job({"action": "eval", "preset": "kit-180", "workers": workers})
+    assert ok is False
+    assert "integer" in why
+
+
+def test_workers_defaults_per_runner_not_globally():
+    """A single scalar default of 2 refused EVERY lite preset -- three of the four are lite."""
+    assert C.DEFAULT_WORKERS == {"frozen": 2, "lite": 1}
+    assert C.MAX_WORKERS == 4
 
 
 def test_job_public_view_hides_the_token_only():
