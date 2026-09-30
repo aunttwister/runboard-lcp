@@ -117,9 +117,7 @@ def _eval_env(monkeypatch, rc=0, lines=("row 1 ok",), polls=2, never_exits=False
     monkeypatch.setattr(dispatcher, "live_engine", lambda: {"model_id": "qwen38-flash-next-exl3"})
 
 
-def _summary(run_id, **over):
-    d = C.RUNS_DIR / run_id
-    d.mkdir(parents=True, exist_ok=True)
+def _summary_doc(**over):
     doc = {"families": {"gsm8k": {"correct": 6, "graded": 7, "accuracy_pct": 85.7}},
            "rows_attempted": 21, "auto_graded_correct": 18, "auto_graded_total": 20,
            "e2e_tok_s_mean": 41.4, "e2e_tok_s_p50": 40.1, "wall_seconds": 300,
@@ -127,7 +125,29 @@ def _summary(run_id, **over):
            "dataset_sha256": "a" * 64, "kit": None, "coverage_note": "n",
            "skipped_rows": 1}
     doc.update(over)
+    return doc
+
+
+def _summary(run_id, **over):
+    """The summary where the DISPATCHER reads it: runs/<run_id>/summary.json."""
+    d = C.RUNS_DIR / run_id
+    d.mkdir(parents=True, exist_ok=True)
+    doc = _summary_doc(**over)
     (d / "summary.json").write_text(json.dumps(doc))
+    return doc
+
+
+def _artifacts(run_id, **over):
+    """The two artifacts where the RUNNER writes them: paths RELATIVE to its cwd.
+
+    run_quality_set.py calls Path(f"{run_id}.rows.jsonl") and
+    Path(f"{run_id}.summary.json"), so they land in whatever cwd it was given -- not in
+    runs/<run_id>/, which is the mismatch the publish step exists to close.
+    """
+    doc = _summary_doc(**over)
+    (C.BENCH / f"{run_id}.rows.jsonl").write_text(
+        '{"family": "gsm8k"}\n{"family": "humaneval"}\n')
+    (C.BENCH / f"{run_id}.summary.json").write_text(json.dumps(doc))
     return doc
 
 
@@ -169,10 +189,74 @@ def test_do_eval_runs_the_frozen_runner_for_kit_180(monkeypatch, st):
     # cwd alone is not enough -- Python puts the script's directory on sys.path, not the cwd.
     # Without PYTHONPATH the module-level import dies before a single row is graded.
     kw = dispatcher.subprocess.Popen.instances[0].kwargs
-    assert kw["cwd"] == "/root/exl3-bench"
-    assert kw["env"]["PYTHONPATH"] == "/root/exl3-bench"
+    assert kw["cwd"] == str(C.BENCH)
+    assert kw["env"]["PYTHONPATH"] == str(C.BENCH)
     assert kw["env"]["PYTHONHASHSEED"] == "0"
     assert any("no summary.json" in line for line in st.logs)
+
+
+def test_do_eval_publishes_the_run_into_the_directory_the_board_reads(monkeypatch, st):
+    """A console-launched run must appear on the board, not just on the disk.
+
+    history_collector reads runs/<run_id>/summary.json and runs/<run_id>/rows.jsonl and
+    nothing else, bar two hardcoded manual lane names. A run left at
+    <bench>/<run_id>.rows.jsonl was therefore invisible: the page showed no run, and the
+    dispatcher logged "no summary.json" for a run that had graded 18/20.
+    """
+    _eval_env(monkeypatch)
+    _artifacts("j6-current")
+    result = dispatcher.do_eval({"job_id": "j6", "action": "eval", "preset": "kit-180"},
+                               st, "j6-current")
+
+    published = C.RUNS_DIR / "j6-current"
+    runner_rows = C.BENCH / "j6-current.rows.jsonl"
+    assert (published / "rows.jsonl").read_text() == runner_rows.read_text()
+    assert json.loads((published / "summary.json").read_text())["grader"] == "q200v2"
+    # Linked, not copied: a killed run resumes by appending to its relative path, so both
+    # names have to stay on one inode or a resumed run would stop being visible.
+    assert (published / "rows.jsonl").stat().st_ino == runner_rows.stat().st_ino
+    # and the grade is now read from the published copy instead of being missed
+    assert result["summary"]["auto_graded"] == "18/20"
+    assert not any("no summary.json" in line for line in st.logs)
+    assert any("published summary.json" in line for line in st.logs)
+
+
+def test_do_eval_counts_rows_from_the_disk_not_the_buffered_log(monkeypatch, st):
+    """rows_seen must not sit at 0 for a run that is writing rows.
+
+    The runner's stdout is block-buffered when it is redirected to a file, so the job log can
+    stay empty for a whole 180-row run: the page reported 0 rows from the first tick to the
+    last while rows were landing every few seconds. The rows file is the artifact that grows.
+    """
+    _eval_env(monkeypatch, lines=())
+    _artifacts("j7-current")
+    dispatcher.do_eval({"job_id": "j7", "action": "eval", "preset": "kit-180"}, st, "j7-current")
+    assert status_doc()["rows_seen"] == 2
+
+
+def test_do_eval_republishes_over_an_existing_run_and_copies_when_linking_fails(
+        monkeypatch, st):
+    """A resumed run re-publishes, and a refused link falls back to a copy.
+
+    os.link is not universally available -- it fails across devices and on some overlay
+    mounts -- and the run still has to reach the board, so the copy is the safety net rather
+    than a reason to publish nothing. A second attempt at the same run id must also replace
+    the stale artifact instead of leaving the board showing the old one.
+    """
+    _eval_env(monkeypatch)
+    _artifacts("j8-current")
+    stale = C.RUNS_DIR / "j8-current"
+    stale.mkdir(parents=True, exist_ok=True)
+    (stale / "rows.jsonl").write_text("stale\n")
+
+    def refuse(*_a, **_k):
+        raise OSError("EXDEV: cross-device link")
+
+    monkeypatch.setattr(dispatcher.os, "link", refuse)
+    dispatcher.do_eval({"job_id": "j8", "action": "eval", "preset": "kit-180"}, st, "j8-current")
+
+    assert "gsm8k" in (stale / "rows.jsonl").read_text()
+    assert (stale / "summary.json").exists()
 
 
 def test_do_eval_without_a_summary_says_the_run_may_have_failed(monkeypatch, st):

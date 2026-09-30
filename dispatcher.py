@@ -44,7 +44,7 @@ DEFAULT_TIMEOUT = 14400
 # /root/exl3-bench/run_laneA.sh and run_laneA2.sh have always launched this runner with
 # exactly these two variables; PYTHONHASHSEED=0 is part of the measurement, not a nicety --
 # it keeps grading independent of dict/set iteration order.
-RUNNER_ENV = {"PYTHONPATH": "/root/exl3-bench", "PYTHONHASHSEED": "0"}
+RUNNER_ENV = {"PYTHONPATH": str(C.BENCH), "PYTHONHASHSEED": "0"}
 
 
 def now() -> str:
@@ -257,6 +257,53 @@ def do_switch(job, st: Status) -> None:
         raise RuntimeError(f"switched to {want} but it does not answer")
 
 
+def _rows_written(run_id: str) -> int:
+    """How many rows the frozen runner has finished, counted on the disk.
+
+    The runner's stdout is block-buffered when it is redirected to a file, so the job log can
+    sit at 0 bytes for a whole 180-row run: the page reported rows_seen=0 from the first tick
+    to the last while rows were in fact landing every few seconds. The rows file is
+    append-only and written as rows complete, so this is the same move the download probe
+    already needed -- measure the artifact, not the log that describes it.
+    """
+    try:
+        with (C.BENCH / f"{run_id}.rows.jsonl").open("rb") as fh:
+            return sum(1 for _ in fh)
+    except OSError:
+        return 0
+
+
+def _publish_run(run_id: str, st: Status) -> None:
+    """Put a finished run where the board looks for it.
+
+    history_collector reads runs/<run_id>/summary.json and runs/<run_id>/rows.jsonl, and that
+    is the whole contract. The frozen runner writes both artifacts on RELATIVE paths
+    (Path(f"{run_id}.rows.jsonl")), i.e. into whatever cwd it was handed, so a
+    console-launched run landed at <bench>/<run_id>.rows.jsonl and the board never saw it: no
+    run appeared, and the summary lookup below then logged "no summary.json" for a run that
+    had graded perfectly. Only two hardcoded manual lane names are read from the top level, so
+    nothing else was ever going to pick it up.
+
+    Link rather than copy: a killed run resumes by appending to that same relative path, and a
+    hard link keeps both names on one inode, so a resumed run stays visible too.
+    """
+    rundir = C.RUNS_DIR / run_id
+    for src_name, dst_name in ((f"{run_id}.rows.jsonl", "rows.jsonl"),
+                               (f"{run_id}.summary.json", "summary.json")):
+        src = C.BENCH / src_name
+        if not src.exists():
+            continue
+        rundir.mkdir(parents=True, exist_ok=True)
+        dst = rundir / dst_name
+        if dst.exists():
+            dst.unlink()
+        try:
+            os.link(src, dst)
+        except OSError:
+            shutil.copy2(src, dst)
+        st.log(f"published {dst_name} -> {dst}")
+
+
 def do_eval(job, st: Status, run_id: str) -> dict:
     preset = C.PRESETS[job["preset"]]
     log = C.LOGDIR / f"{run_id}.log"
@@ -298,7 +345,7 @@ def do_eval(job, st: Status, run_id: str) -> dict:
     env = {**os.environ, **RUNNER_ENV} if preset["runner"] == "frozen" else None
     with log.open("w") as fh:
         proc = subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT,
-                                cwd="/root/exl3-bench", env=env)
+                                cwd=str(C.BENCH), env=env)
         killed = False
         while proc.poll() is None:
             if time.time() - t0 > timeout:
@@ -310,8 +357,12 @@ def do_eval(job, st: Status, run_id: str) -> dict:
                 break
             time.sleep(10)
             rows = log_tail(log, 3)
+            # The frozen runner's rows file is the honest count; the lite runner writes no
+            # such file, so its log markers stay the fallback.
             st.set(phase="eval", elapsed_s=round(time.time() - t0, 1),
-                   rows_seen=sum(1 for l in log_tail(log, 400) if re.match(r"^\s*\[?\d+", l)))
+                   rows_seen=(_rows_written(run_id)
+                              or sum(1 for l in log_tail(log, 400)
+                                     if re.match(r"^\s*\[?\d+", l))))
             if rows:
                 self_last = rows[-1][:160]
                 # Status.log stores "[ts]   <line>" (the two-space indent is part of the
@@ -323,6 +374,7 @@ def do_eval(job, st: Status, run_id: str) -> dict:
                     st.log("  " + self_last)
     rc = proc.returncode
     st.log(f"preset finished rc={rc} after {time.time() - t0:.0f}s")
+    _publish_run(run_id, st)
 
     result = {"run_id": run_id, "preset": job["preset"], "rc": rc,
               "engine": job.get("engine", "current"), "workers": workers,

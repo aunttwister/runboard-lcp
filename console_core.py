@@ -192,6 +192,11 @@ RUNNER_FROZEN = os.environ.get(
     "RUNBOARD_RUNNER_FROZEN",
     "/root/exl3-engine/r0b0bench/subsets/q200v2/scripts/run_quality_set.py")
 RUNS_DIR = Path(os.environ.get("RUNBOARD_RUNS_DIR", "/root/exl3-bench/runs"))
+# The bench root is where the runner is launched and where it drops its
+# artifacts. The board reads runs/<id>/ instead (see history_collector), which is
+# why the dispatcher has to move them -- both were hardcoded "/root/exl3-bench"
+# in dispatcher.py, so a test could not point them anywhere else.
+BENCH = Path(os.environ.get("RUNBOARD_BENCH", "/root/exl3-bench"))
 SANDBOX_IMAGE = "sha256:58a0bd6b97f7001475fbe7ec8052bf2a7b0f4b7fb507097e5594c5d5b4d28644"
 
 
