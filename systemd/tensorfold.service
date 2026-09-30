@@ -23,6 +23,13 @@ WorkingDirectory=/root/tensorfold-qwen38
 Environment=PORT=18300
 Environment=FOREGROUND=1
 Environment=PREPARE=0
+# HOME is NOT optional. scripts/config.sh derives HF_CACHE and KERNEL_CACHE from
+# ${HOME}: "${HF_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}}". A system unit gets no HOME
+# from systemd, and start.sh runs `set -euo pipefail`, so sourcing config.sh aborted the
+# whole start on `line 61: HOME: unbound variable` -- exit 1 in 4 ms, before a single line
+# was logged to the journal (this unit sends its output to /root/tensorfold.log). Every
+# switch to tensorfold therefore "succeeded" while starting nothing. 2026-09-29.
+Environment=HOME=/root
 ExecStart=/bin/bash /root/tensorfold-qwen38/start.sh restart
 # TensorFold gets its own 30s container stop plus the load/unload overhead; systemd must
 # not SIGKILL the trap before stop.sh has removed the container and freed the GPU.
