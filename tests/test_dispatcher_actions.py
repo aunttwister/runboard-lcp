@@ -122,6 +122,8 @@ def test_do_eval_runs_the_lite_runner_and_reads_the_summary(monkeypatch, st):
     assert s["e2e_tok_s_mean"] == 41.4
     assert status_doc()["rows_seen"] == 1  # the "[1] ..." line is a row marker
     assert any("summary:" in line for line in st.logs)
+    # The lite runner is self-contained: its environment stays exactly as it was.
+    assert dispatcher.subprocess.Popen.instances[0].kwargs["env"] is None
 
 
 def test_do_eval_runs_the_frozen_runner_for_kit_180(monkeypatch, st):
@@ -132,6 +134,13 @@ def test_do_eval_runs_the_frozen_runner_for_kit_180(monkeypatch, st):
     assert cmd[1] == C.RUNNER_FROZEN
     assert C.SANDBOX_IMAGE in cmd and "--workers" in cmd and "--admission-config" in cmd
     assert "quality-text-180-v2.jsonl" in " ".join(cmd)
+    # run_quality_set.py imports niah_common/admission_control from /root/exl3-bench, so the
+    # cwd alone is not enough -- Python puts the script's directory on sys.path, not the cwd.
+    # Without PYTHONPATH the module-level import dies before a single row is graded.
+    kw = dispatcher.subprocess.Popen.instances[0].kwargs
+    assert kw["cwd"] == "/root/exl3-bench"
+    assert kw["env"]["PYTHONPATH"] == "/root/exl3-bench"
+    assert kw["env"]["PYTHONHASHSEED"] == "0"
     assert any("no summary.json" in line for line in st.logs)
 
 

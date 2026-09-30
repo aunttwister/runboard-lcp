@@ -35,6 +35,17 @@ LOG_KEEP = 60          # lines of log tail exposed to the page
 JOB_TIMEOUT = {"smoke-20": 1800, "quick-60": 5400, "kit-140": 14400, "kit-180": 28800}
 DEFAULT_TIMEOUT = 14400
 
+# The frozen runner is NOT self-contained. run_quality_set.py imports niah_common and
+# admission_control, which live in /root/exl3-bench -- not next to the script -- and Python
+# puts the SCRIPT's own directory on sys.path, never the cwd. So the cwd= passed to Popen in
+# do_eval does not make them importable, and the run dies after 10 s with
+# "ModuleNotFoundError: No module named 'niah_common'" (its fallback import of
+# "scripts.niah_common" fails too, because there is no scripts package on sys.path either).
+# /root/exl3-bench/run_laneA.sh and run_laneA2.sh have always launched this runner with
+# exactly these two variables; PYTHONHASHSEED=0 is part of the measurement, not a nicety --
+# it keeps grading independent of dict/set iteration order.
+RUNNER_ENV = {"PYTHONPATH": "/root/exl3-bench", "PYTHONHASHSEED": "0"}
+
 
 def now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -268,8 +279,12 @@ def do_eval(job, st: Status, run_id: str) -> dict:
            f"({workers} concurrent stream(s), timeout {timeout}s)")
     st.log("cmd: " + " ".join(str(c) for c in cmd))
     t0 = time.time()
+    # Only the frozen runner needs its sibling modules; the lite runner is self-contained,
+    # so leave its environment exactly as it has always been.
+    env = {**os.environ, **RUNNER_ENV} if preset["runner"] == "frozen" else None
     with log.open("w") as fh:
-        proc = subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT, cwd="/root/exl3-bench")
+        proc = subprocess.Popen(cmd, stdout=fh, stderr=subprocess.STDOUT,
+                                cwd="/root/exl3-bench", env=env)
         killed = False
         while proc.poll() is None:
             if time.time() - t0 > timeout:
