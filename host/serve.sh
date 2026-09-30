@@ -63,6 +63,25 @@ stop_vllm(){ docker stop -t 60 "$PROD" >/dev/null 2>&1 || true; sleep 8; }
 # The TensorFold unit wraps the recipe's own start.sh; stopping the unit runs stop.sh
 # through start.sh's INT/TERM trap, which removes the container and frees its GPU memory.
 stop_tensorfold(){ systemctl stop "$TF" >/dev/null 2>&1 || true; sleep 12; }
+# vllm-exl3-cruz.service is the default occupant of :18300, and NOTHING here used to stop
+# it: stop_vllm only stops the PROD *container*, and stop_exl3 only the fork/stock
+# exllamav3 units. Every switch away from the baseline therefore left the incumbent
+# listening, and the incoming engine aborted with "port 18300 is already in use" (or never
+# answered at all) while serve.sh still exited 0 -- the whole reason a TensorFold switch
+# could "succeed" without starting anything.
+#
+# Wait for the port itself rather than guessing a sleep: releasing ~85 GB of weights takes
+# as long as it takes, and a free port is the thing the next engine actually needs.
+stop_vllm_cruz(){
+  systemctl stop "$VLLM_EXL3" >/dev/null 2>&1 || true
+  local i
+  for i in $(seq 1 30); do
+    ss -ltn 2>/dev/null | grep -q ":$PORT " || { sleep 2; return 0; }
+    sleep 2
+  done
+  step "!! :$PORT is still held after stopping $VLLM_EXL3"
+  return 0
+}
 
 wait_health(){ # $1 label, $2 tries(10s)
   local i
@@ -121,7 +140,7 @@ case "${1:-status}" in
   cruz)
     RESTORE=$(current); [ "$RESTORE" = cruz ] && { step "already serving cruz"; show_status; exit 0; }
     step "=== switch to CRUZ FORK + 3.05bpw (was: $RESTORE) ==="
-    stop_vllm; stop_exl3; stop_tensorfold
+    stop_vllm; stop_exl3; stop_tensorfold; stop_vllm_cruz
     systemctl reset-failed "$CRUZ" >/dev/null 2>&1 || true
     systemctl start "$CRUZ" || { step "ABORT: start failed"; restore_on_failure; exit 4; }
     wait_health "cruz fork" 90 || { restore_on_failure; exit 5; }
@@ -130,7 +149,7 @@ case "${1:-status}" in
   exl3)
     RESTORE=$(current); [ "$RESTORE" = exl3 ] && { step "already serving exl3 2.50bpw"; show_status; exit 0; }
     step "=== switch to stock exllamav3 + 2.50bpw (was: $RESTORE) ==="
-    stop_vllm; stop_exl3; stop_tensorfold
+    stop_vllm; stop_exl3; stop_tensorfold; stop_vllm_cruz
     systemctl reset-failed "$STOCK" >/dev/null 2>&1 || true
     systemctl start "$STOCK" || { step "ABORT: start failed"; restore_on_failure; exit 4; }
     wait_health "exl3 2.50bpw" 90 || { restore_on_failure; exit 5; }
@@ -139,7 +158,7 @@ case "${1:-status}" in
   vllm)
     RESTORE=$(current); [ "$RESTORE" = vllm ] && { step "already serving vLLM"; show_status; exit 0; }
     step "=== switch to the vLLM prod container (was: $RESTORE) ==="
-    stop_exl3; stop_tensorfold
+    stop_exl3; stop_tensorfold; stop_vllm_cruz
     docker start "$PROD" >/dev/null 2>&1 || { step "ABORT: docker start failed"; restore_on_failure; exit 4; }
     wait_health "vLLM prod" 120 || { restore_on_failure; exit 5; }
     step "rollback = serve.sh $RESTORE"
@@ -147,7 +166,7 @@ case "${1:-status}" in
   tensorfold)
     RESTORE=$(current); [ "$RESTORE" = tensorfold ] && { step "already serving TensorFold"; show_status; exit 0; }
     step "=== switch to TensorFold v0.3.6.3 + MLX 4-bit (was: $RESTORE) ==="
-    stop_vllm; stop_exl3; stop_tensorfold
+    stop_vllm; stop_exl3; stop_tensorfold; stop_vllm_cruz
     systemctl reset-failed "$TF" >/dev/null 2>&1 || true
     systemctl start "$TF" || { step "ABORT: start failed"; restore_on_failure; exit 4; }
     # A warm start loads ~75 GiB of weights in ~2.5 min; the FIRST start after an image
