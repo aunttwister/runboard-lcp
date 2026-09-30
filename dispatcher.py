@@ -237,6 +237,20 @@ def do_switch(job, st: Status) -> None:
     if rc != 0:
         st.log(f"switch failed rc={rc} {err[:200]}")
         raise RuntimeError(f"switch to {want} failed rc={rc}")
+    # A switch that did not take must FAIL here. serve.sh returns 0 as soon as systemd has
+    # spawned the target unit, so a unit that dies 4 ms later -- tensorfold: its config.sh
+    # reads an unset $HOME, and system units have no HOME, so start.sh dies sourcing it --
+    # still looks like a successful switch. The generation probe then passes as well,
+    # because the engine that keeps answering is the one we meant to displace: both engines
+    # serve the same model id ("qwen3.8-flash-next" vs "Qwen3.8-Flash-Next"), so asking
+    # /v1/models cannot tell them apart either. That combination is how a run against the
+    # old engine got published under the new engine's name. Assert the engine we asked for
+    # is the engine that is now serving, before anything is measured on it.
+    after = live_engine().get("target")
+    st.log(f"engine now: {after!r} (wanted {want!r})")
+    if switch_value_for(after) != target:
+        st.log(f"!! switch did not take: :{PORT} reports {after!r}, wanted {want!r}")
+        raise RuntimeError(f"switch to {want} did not take (still {after!r})")
     ok, why = probe_generation()
     st.log(f"generation probe: {'OK' if ok else 'FAIL'} — {why}")
     if not ok:

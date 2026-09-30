@@ -16,6 +16,7 @@ import pytest
 
 import console_core as C
 import dispatcher
+import registry
 from dispatcherkit import FakeTime, fake_popen, make_hf_cli, queue_job, status_doc
 
 
@@ -58,6 +59,26 @@ def _run(override=None, default=(0, "serve.sh: engine up\n", "")):
         return override.get(cmd[-1], default)
 
     return fake_run
+
+
+def _engine_follows_serve(calls, first="vllm-prod"):
+    """live_engine() as the box really behaves: ``serve.sh`` is what changes the engine.
+
+    Every other fake here is static, and a static live_engine() cannot express "the switch
+    took" -- which is exactly how a switch that started nothing went unnoticed. Derive the
+    serving engine from the serve.sh calls that have actually happened: before any of them
+    the box is on ``first``, and each ``serve.sh <token>`` leaves the catalogue entry whose
+    switch token that is. Note the two id-spaces: CATALOGUE ids here, job engine names there.
+    """
+    def live():
+        for cmd in reversed(calls):
+            if cmd and cmd[0] == dispatcher.SERVE:
+                for entry in registry.CATALOGUE:
+                    if entry.get("switch") == cmd[-1]:
+                        return _serving(entry["id"])
+        return _serving(first)
+
+    return live
 
 
 # ---------------------------------------------------------------- idle tick
@@ -117,7 +138,7 @@ def test_an_invalid_job_is_rejected_before_anything_else_runs(load_tree, calls):
 # ---------------------------------------------------------------- the eval path
 
 def test_an_eval_switches_runs_and_restores_the_baseline(load_tree, calls, monkeypatch):
-    monkeypatch.setattr(dispatcher, "live_engine", lambda: _serving("vllm-prod"))
+    monkeypatch.setattr(dispatcher, "live_engine", _engine_follows_serve(calls))
     queue_job({"job_id": "m1", "action": "eval", "preset": "smoke-20", "engine": "exl3"},
               name="m1")
 
@@ -258,7 +279,7 @@ def test_a_requeue_that_fails_does_not_lose_the_job(load_tree, monkeypatch):
 
 def test_an_explicit_serve_is_left_in_place_and_the_drift_is_recorded(load_tree, calls,
                                                                       monkeypatch):
-    monkeypatch.setattr(dispatcher, "live_engine", lambda: _serving("vllm-prod"))
+    monkeypatch.setattr(dispatcher, "live_engine", _engine_follows_serve(calls))
     queue_job({"job_id": "m9", "action": "serve", "engine": "exl3"}, name="m9")
 
     assert dispatcher.main() == 0

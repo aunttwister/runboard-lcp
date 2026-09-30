@@ -20,6 +20,19 @@ def st(load_tree):
     return dispatcher.Status()
 
 
+def _engine_changes(monkeypatch, before, after):
+    """live_engine() answers `before` once (what was serving), then `after` (what is).
+
+    do_switch asks twice: once for the current engine, then again to confirm the switch
+    took. A static lambda can only model one of those, which is how the "did it take?"
+    check went missing in the first place. Note the two id-spaces: live_engine() reports
+    registry.CATALOGUE ids ("exl3-2.5bpw", "vllm-prod"), and switch_value_for() maps those
+    to the serve.sh tokens that C.ENGINES uses as job engine names ("exl3", "vllm").
+    """
+    seen = iter([{"target": before}])
+    monkeypatch.setattr(dispatcher, "live_engine", lambda: next(seen, {"target": after}))
+
+
 # ---------------------------------------------------------------- do_switch
 
 def test_do_switch_is_a_no_op_for_the_current_engine(monkeypatch, st):
@@ -44,7 +57,7 @@ def test_do_switch_runs_serve_sh_and_probes_the_engine(monkeypatch, st):
         seen.append(cmd)
         return (0, "engine up\nlistening on 18300\n", "")
 
-    monkeypatch.setattr(dispatcher, "live_engine", lambda: {"target": "vllm-prod"})
+    _engine_changes(monkeypatch, "vllm-prod", "exl3-2.5bpw")
     monkeypatch.setattr(dispatcher, "run", fake_run)
     monkeypatch.setattr(dispatcher, "probe_generation", lambda timeout=180: (True, "pong 4"))
     dispatcher.do_switch({"engine": "exl3"}, st)
@@ -52,6 +65,7 @@ def test_do_switch_runs_serve_sh_and_probes_the_engine(monkeypatch, st):
     assert status_doc()["phase"] == "switch"
     assert "switching :18300 to exl3 (serve.sh exl3)" in " ".join(st.logs)
     assert any("listening on 18300" in line for line in st.logs)
+    assert any("engine now: 'exl3-2.5bpw' (wanted 'exl3')" in line for line in st.logs)
     assert any("generation probe: OK" in line for line in st.logs)
 
 
@@ -65,13 +79,30 @@ def test_do_switch_raises_when_serve_sh_fails(monkeypatch, st):
 
 
 def test_do_switch_raises_when_the_probe_does_not_answer(monkeypatch, st):
-    monkeypatch.setattr(dispatcher, "live_engine", lambda: {"target": "vllm-prod"})
+    _engine_changes(monkeypatch, "vllm-prod", "exl3-2.5bpw")
     monkeypatch.setattr(dispatcher, "run", lambda *a, **k: (0, "engine up", ""))
     monkeypatch.setattr(dispatcher, "probe_generation",
                         lambda timeout=180: (False, "OSError: refused"))
     with pytest.raises(RuntimeError, match="does not answer"):
         dispatcher.do_switch({"engine": "exl3"}, st)
     assert any("generation probe: FAIL" in line for line in st.logs)
+
+
+def test_do_switch_raises_when_the_engine_did_not_change(monkeypatch, st):
+    """The 2026-09-29 failure: serve.sh exits 0, the target unit dies 4 ms later, the old
+    engine never stopped answering, and its generation probe passed -- so a run against
+    vllm-cruz was recorded and reported as a TensorFold result. The switch has to fail."""
+    _engine_changes(monkeypatch, "vllm-cruz", "vllm-cruz")
+    monkeypatch.setattr(dispatcher, "run", lambda *a, **k: (0, "engine up", ""))
+    probed = []
+    monkeypatch.setattr(dispatcher, "probe_generation",
+                        lambda timeout=180: probed.append(1) or (True, "pong 4"))
+    with pytest.raises(RuntimeError, match=r"switch to tensorfold did not take \(still 'vllm-cruz'\)"):
+        dispatcher.do_switch({"engine": "tensorfold"}, st)
+    assert any("engine now: 'vllm-cruz' (wanted 'tensorfold')" in line for line in st.logs)
+    assert any("!! switch did not take" in line for line in st.logs)
+    # and it must fail BEFORE anything is measured on the wrong engine
+    assert probed == []
 
 
 # ---------------------------------------------------------------- do_eval
