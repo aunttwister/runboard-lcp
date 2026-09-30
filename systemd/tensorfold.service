@@ -23,6 +23,13 @@ WorkingDirectory=/root/tensorfold-qwen38
 Environment=PORT=18300
 Environment=FOREGROUND=1
 Environment=PREPARE=0
+# PARALLEL is 4, not the recipe's default 5. At 5 streams the CUDA startup budget cannot fit
+# the model's native 262144-token context on this box's 121 GB of unified memory: TensorFold
+# computed the largest fitting window as 216164 tokens per stream and then refused to load
+# anything at all -- "no model weights or KV caches have been loaded" -- rather than start
+# serving with less context than it was asked for. At 4 streams the same 262144 context fits
+# (4 x 262144 < 5 x 216164), and 4 is exactly the concurrency the eval asks for.
+Environment=PARALLEL=4
 # HOME is NOT optional. scripts/config.sh derives HF_CACHE and KERNEL_CACHE from
 # ${HOME}: "${HF_CACHE:-${HF_HOME:-$HOME/.cache/huggingface}}". A system unit gets no HOME
 # from systemd, and start.sh runs `set -euo pipefail`, so sourcing config.sh aborted the
