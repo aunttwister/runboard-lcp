@@ -46,7 +46,7 @@
 <body>
 <header>
 <!--ZgX:chrome-->
-  <span class="badge">soak run recorded on exllamav3 2.50bpw (retired) — :18300 now serves the Cruz fork</span>
+  <span class="badge" id="hdr-port" title="what :18300 is serving right now, from the engine's own API — never a hardcoded claim">reading :18300…</span>
   <span id="phase" class="badge">starting</span>
   <span id="age" class="badge">—</span>
   <span id="unit" class="badge">:18300</span>
@@ -276,6 +276,8 @@ function renderEngine(live) {
     src.textContent = "no engine block";
     src.className = "badge stale";
     $("eng-note").textContent = "the live document carried no engine block";
+    const hdr0 = $("hdr-port");
+    if (hdr0) { hdr0.textContent = ":18300 unknown"; hdr0.className = "badge stale"; }
     line($("c-eng"), [], []);
     return;
   }
@@ -298,6 +300,15 @@ function renderEngine(live) {
   const up = !!e.reachable;
   src.textContent = up ? ("engine " + (e.model || ":18300") + " \u00b7 read now") : "engine not answering";
   src.className = "badge " + (up ? "live" : "stale");
+  // The header badge states what :18300 is serving RIGHT NOW, derived from the engine's
+  // own API on every poll. It replaced a hardcoded string that claimed the port served
+  // the Cruz fork -- a claim that stayed on the page through two engine swaps.
+  const hdr = $("hdr-port");
+  if (hdr) {
+    hdr.textContent = up ? (":18300 serves " + (e.model || "an unnamed model"))
+                         : ":18300 no answer";
+    hdr.className = "badge " + (up ? "live" : "stale");
+  }
 
   const byKey = {};
   (e.series || []).forEach((s) => { byKey[s.key] = s.values || []; });

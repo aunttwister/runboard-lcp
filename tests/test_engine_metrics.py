@@ -598,3 +598,97 @@ def test_single_stream_item_is_a_dash_until_one_interval_qualified():
     item = {i["key"]: i for i in doc["items"]}["ss_decode_tps"]
     assert item["value"] == pytest.approx(50.0)
     assert "1 interval" in item["basis"]    # the sample count is stated, so 50 is not over-read
+
+
+# ------------------------------------------------------------------ metric-name families
+#
+# The engine changed families under the card once already (vllm:* -> tensorfold:*) and every
+# KPI went quietly null while ~70 tok/s left the port. The family layer is pinned end to end:
+# detection from the exposition's own keys, per-family expression translation, and a full
+# block() against a TensorFold-shaped document.
+
+TF_TEXT = (
+    b"tensorfold:requests_running 2\n"
+    b"tensorfold:requests_waiting 1\n"
+    b"tensorfold:kv_cache_usage_ratio 0.31\n"
+    b"tensorfold:generation_tokens_total 1938130\n"
+    b"tensorfold_health:requests_total 1419\n"
+    b"tensorfold_health:decode_seconds_total 53713.4\n"
+)
+
+
+def tf_route(values=None, calls=None, models=None, metrics=TF_TEXT):
+    """A fetch routed like route(), plus the OpenAI model list on the same port."""
+
+    def f(url, timeout=None):
+        if calls is not None:
+            calls.append(url)
+        if url.endswith("/v1/models"):
+            payload = models if models is not None else \
+                {"object": "list", "data": [{"id": "GLM-5.3-Flash-EXL3"}]}
+            return json.dumps(payload).encode()
+        if "query" in url:
+            query = urllib.parse.unquote(urllib.parse.parse_qs(
+                urllib.parse.urlparse(url).query).get("query", [""])[0])
+            for needle, value in (values or {}).items():
+                if needle in query:
+                    return vector(value)
+            return vector(None)
+        return metrics
+
+    return f
+
+
+def test_detect_family_reads_the_expositions_own_keys():
+    assert EM.detect_family({"tensorfold:requests_running": 1}) == "tensorfold"
+    assert EM.detect_family({"vllm:num_requests_running": 1}) == "vllm"
+    assert EM.detect_family({}) is None
+    assert EM.detect_family(None) is None
+
+
+def test_expr_for_translates_the_family_and_honours_expression_overrides():
+    tf = "tensorfold"
+    assert EM.expr_for("output_tps", tf) == "sum(rate(tensorfold:generation_tokens_total[2m]))"
+    assert "tensorfold_health:requests_total" in EM.expr_for("req_per_min", tf)
+    # prefill cannot be a rename: TF's prompt counter includes cached tokens, so the
+    # KV-computed form must be computed by subtraction
+    assert "tensorfold:prompt_tokens_total" in EM.expr_for("prefill_tps", tf)
+    assert "tensorfold_health:cached_tokens_total" in EM.expr_for("prefill_tps", tf)
+    # an unknown family keeps the canonical names -> honest dashes, never a wrong series
+    assert EM.expr_for("output_tps", None) == EM.EXPR["output_tps"]
+
+
+def test_block_reads_a_tensorfold_engine_and_names_the_model_from_the_api():
+    """The live failure, reproduced: a bare exposition and a live model behind it."""
+    fetch = tf_route(values={"tensorfold:generation_tokens_total[2m]": "71.2"})
+    doc = EM.block(now=10_000, fetch=fetch, use_cache=False)
+    items = {i["key"]: i["value"] for i in doc["items"]}
+    assert items["running"] == 2 and items["waiting"] == 1
+    assert items["kv_pct"] == 31.0
+    assert items["output_tps"] == 71.2
+    assert doc["model"] == "GLM-5.3-Flash-EXL3", \
+        "a bare exposition must still name the served model, via the OpenAI API"
+    assert "tensorfold names" in doc["sources"][0]["detail"]
+
+
+def test_tensorfold_basis_travels_with_the_new_definitions():
+    doc = EM.block(now=10_000, fetch=tf_route(), use_cache=False)
+    basis = {i["key"]: i["basis"] for i in doc["items"]}
+    assert "prefix-cached" in basis["prefill_tps"]
+    assert basis["prefix_hit"] == "cached/prompt tokens, 30m"
+
+
+def test_the_generation_counter_is_queried_in_the_familys_names():
+    seen = []
+    EM.recent(now=10_000, fetch=tf_route(calls=seen), family="tensorfold")
+    queries = [urllib.parse.unquote(urllib.parse.parse_qs(
+        urllib.parse.urlparse(u).query).get("query", [""])[0]) for u in seen]
+    assert any("sum(tensorfold:generation_tokens_total)" in q for q in queries), \
+        "recency must read the family's own counter, not a vllm: name nothing publishes"
+
+
+def test_openai_model_probe_degrades_to_none_when_the_api_does_not_answer():
+    def boom(url, timeout=None):
+        raise OSError("refused")
+
+    assert EM._openai_model(boom) is None

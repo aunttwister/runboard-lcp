@@ -316,7 +316,7 @@ def test_build_describes_every_catalogue_entry(monkeypatch):
 
     doc = registry.build()
     assert doc["schema"] == "zgx.console.models.v1"
-    assert doc["port"] == registry.PORT and doc["baseline"] == "vllm-cruz"
+    assert doc["port"] == registry.PORT and doc["baseline"] == "tensorfold-glm53"
     assert doc["serving"] == {"target": "cruz"}
     assert doc["generated_utc"].endswith("Z")
     assert doc["hf_token_present"] is True and doc["dispatch_token_present"] is True
@@ -339,3 +339,29 @@ def test_build_reports_missing_tokens_as_absent(monkeypatch):
     doc = registry.build()
     assert doc["hf_token_present"] is False and doc["dispatch_token_present"] is False
     assert doc["entries"][0]["active"] is False and doc["entries"][0]["size_gb"] is None
+
+
+def test_live_engine_names_a_container_engine_through_its_image(monkeypatch):
+    """The TensorFold GLM kit answers /v1/models but no /version, and loads no exllamav3
+    .so: the only self-description left is the image the running container carries."""
+
+    def fake_run(cmd, timeout=20):
+        if cmd[0] == "systemctl":
+            return "inactive"
+        if cmd[0] == "ss":
+            return SS_LINE
+        if cmd[0] == "docker":
+            if cmd[-1] != "glm53-flash-tf":
+                return "stopped"          # only the GLM kit's container is up
+            return "tensorfold-glm53:v0.6.0" if "{{.Config.Image}}" in cmd else "running"
+        return ""
+
+    monkeypatch.setattr(registry, "_run", fake_run)
+    _patch_maps(monkeypatch, text="")
+    _patch_models(monkeypatch, payload={"object": "list",
+                                        "data": [{"id": "GLM-5.3-Flash-EXL3"}]})
+    info = registry.live_engine()
+    assert info["target"] == "tensorfold-glm53" and info["container"] == "glm53-flash-tf"
+    assert info["engine_build"] == "container image tensorfold-glm53:v0.6.0"
+    assert info["healthy"] is True and info["model_id"] == "GLM-5.3-Flash-EXL3"
+    assert info["pid"] == 4711 and info["unit"] is None

@@ -108,6 +108,88 @@ RATE_ITEMS = [
     ("e2e_ms", "End-to-end", "ms", "num1", "mean over finished requests, 5 m"),
 ]
 
+# ------------------------------------------------------------------ metric-name families
+#
+# The engine behind :18300 is swappable, and different engines publish different NAME
+# FAMILIES for the same concepts: vLLM publishes ``vllm:*``; the TensorFold engine
+# publishes ``tensorfold:*`` / ``tensorfold_health:*``. The tables above keep ONE canonical
+# spelling (the vLLM one, which this card was built on) and the alias table below translates
+# per family, detected from what the exposition actually contains. A family with no alias
+# resolves to the canonical names -- so an engine we have no map for renders honest dashes,
+# never a wrong-name null that looks like idle.
+FAMILY_ALIASES = {
+    "tensorfold": {
+        "vllm:num_requests_running": "tensorfold:requests_running",
+        "vllm:num_requests_waiting": "tensorfold:requests_waiting",
+        "vllm:kv_cache_usage_perc": "tensorfold:kv_cache_usage_ratio",
+        "vllm:generation_tokens_total": "tensorfold:generation_tokens_total",
+        # TensorFold publishes no decode ``_count``; its cumulative finished-request
+        # counter plays the same role for the single-stream rule (exactly one request
+        # finished in the interval).
+        "vllm:request_decode_time_seconds_count": "tensorfold_health:requests_total",
+        "vllm:request_decode_time_seconds_sum": "tensorfold_health:decode_seconds_total",
+        "vllm:time_to_first_token_seconds_bucket":
+            "tensorfold:time_to_first_token_seconds_bucket",
+        "vllm:spec_decode_num_accepted_tokens_total": "tensorfold:mtp_accepted_total",
+        "vllm:spec_decode_num_draft_tokens_total": "tensorfold:mtp_drafted_total",
+        "vllm:request_success_total": "tensorfold_health:requests_total",
+        "vllm:e2e_request_latency_seconds_sum": "tensorfold:request_latency_seconds_sum",
+        "vllm:e2e_request_latency_seconds_count": "tensorfold:request_latency_seconds_count",
+    },
+}
+
+# Two KPIs cannot be expressed as a pure rename: TensorFold's prompt-token counter includes
+# prefix-cached tokens, so KV-computed prefill must be computed by SUBTRACTION, and its
+# prefix-cache signal is token-level rather than hits/queries. A family may therefore
+# override the whole expression for a key.
+FAMILY_EXPR = {
+    "tensorfold": {
+        "prefill_tps": ("(sum(rate(tensorfold:prompt_tokens_total[2m]))"
+                        " - sum(rate(tensorfold_health:cached_tokens_total[2m])))"
+                        " / sum(rate(tensorfold_health:prefill_seconds_total[2m]))"),
+        "prefix_hit": ("100 * sum(rate(tensorfold_health:cached_tokens_total[30m]))"
+                       " / sum(rate(tensorfold:prompt_tokens_total[30m]))"),
+    },
+}
+
+# ...and the basis line travels with the expression, because the definition changed with it.
+FAMILY_BASIS = {
+    "tensorfold": {
+        "prefill_tps": "prompt tokens minus prefix-cached tokens per second of prefill time,"
+                       " finished requests, 2m",
+        "prefix_hit": "cached/prompt tokens, 30m",
+        "mtp_accept": "accepted/drafted tokens, 30m",
+        "req_per_min": "all requests, 5m rate",
+    },
+}
+
+
+def detect_family(sums) -> str | None:
+    """Which metric-name family the exposition speaks, read off its own keys."""
+    names = set(sums or {})
+    if any(n.startswith("tensorfold") for n in names):
+        return "tensorfold"
+    if any(n.startswith("vllm:") for n in names):
+        return "vllm"
+    return None
+
+
+def _m(metric: str, family) -> str:
+    """Canonical metric name -> the family's spelling (unchanged for an unknown family)."""
+    return FAMILY_ALIASES.get(family, {}).get(metric, metric)
+
+
+def expr_for(key: str, family) -> str:
+    """The PromQL for a RATE_ITEMS key, in the family's metric names."""
+    override = FAMILY_EXPR.get(family, {}).get(key)
+    if override:
+        return override
+    out = EXPR[key]
+    for src, dst in FAMILY_ALIASES.get(family, {}).items():
+        out = out.replace(src, dst)
+    return out
+
+
 # The chart. Four series would need two axes to stay honest, so the chart carries the three
 # throughput numbers (same scale) and `running` remains a headline KPI.
 # Every key the block publishes, in card order. The page's KPI wiring is checked against this
@@ -126,7 +208,7 @@ SERIES = [
 
 SS_MAXLEN = int(os.environ.get("RUNBOARD_ENGINE_SS_SAMPLES", "20"))
 
-_cache: dict = {"docs": {}, "at": {}, "series": {}, "series_at": {}}
+_cache: dict = {"docs": {}, "at": {}, "series": {}, "series_at": {}, "series_family": {}}
 
 # Single-stream decode: the rate ONE stream actually sees. vLLM's counters are engine-wide and
 # carry no per-request label, so this can only be measured from an interval in which exactly one
@@ -138,7 +220,7 @@ _ss: dict = {"prev": None, "samples": []}
 
 def reset_cache() -> None:
     """Drop the memoised documents and series (tests, and any caller that wants a cold read)."""
-    _cache.update({"docs": {}, "at": {}, "series": {}, "series_at": {}})
+    _cache.update({"docs": {}, "at": {}, "series": {}, "series_at": {}, "series_family": {}})
     _ss.update({"prev": None, "samples": []})
 
 
@@ -185,17 +267,18 @@ def parse_engine(text):
     return sums, model, seen
 
 
-def note_single_stream(counters, now=None) -> None:
+def note_single_stream(counters, now=None, family=None) -> None:
     """Record a single-stream decode sample, but only from an interval that finished ONE request.
 
     Intervals are skipped rather than averaged in when they finished none (nothing to measure) or
     two or more (that is aggregate throughput on a shared engine, which is NOT a per-stream rate --
     conflating the two is what makes a busy engine look slow). A non-positive delta is a counter
-    reset, i.e. an engine restart, and is skipped too.
+    reset, i.e. an engine restart, and is skipped too. Counter names resolve through the
+    family's alias table, so a TensorFold engine feeds the same sampler.
     """
-    gen = counters.get("vllm:generation_tokens_total")
-    dec = counters.get("vllm:request_decode_time_seconds_sum")
-    cnt = counters.get("vllm:request_decode_time_seconds_count")
+    gen = counters.get(_m("vllm:generation_tokens_total", family))
+    dec = counters.get(_m("vllm:request_decode_time_seconds_sum", family))
+    cnt = counters.get(_m("vllm:request_decode_time_seconds_count", family))
     prev = _ss["prev"]
     _ss["prev"] = (gen, dec, cnt, now)
     if prev is None or None in (gen, dec, cnt) or None in prev[:3]:
@@ -277,7 +360,7 @@ RECENT_STEP_S = 30            # the scrape interval, so the reported age is one 
 GEN_COUNTER_EXPR = "sum(vllm:generation_tokens_total)"
 
 
-def recent(now=None, fetch=None, window_s=RECENT_S, step_s=RECENT_STEP_S):
+def recent(now=None, fetch=None, window_s=RECENT_S, step_s=RECENT_STEP_S, family=None):
     """(tokens produced in the window, seconds since the interval that produced them).
 
     Counter steps are summed directly, negative steps dropped -- a restart inside the window
@@ -286,7 +369,10 @@ def recent(now=None, fetch=None, window_s=RECENT_S, step_s=RECENT_STEP_S):
     in either slot means the counter could not answer, which the page draws as a dash.
     """
     now = time.time() if now is None else now
-    pts = prom_range(GEN_COUNTER_EXPR, window_s=window_s, step_s=step_s, now=now, fetch=fetch)
+    counter_expr = GEN_COUNTER_EXPR
+    for src, dst in FAMILY_ALIASES.get(family, {}).items():
+        counter_expr = counter_expr.replace(src, dst)
+    pts = prom_range(counter_expr, window_s=window_s, step_s=step_s, now=now, fetch=fetch)
     if len(pts) < 2:                      # one sample cannot show a change, let alone when
         return None, None
     tokens = 0.0
@@ -349,17 +435,36 @@ def _item(key, label, unit, raw, fmt, basis):
             "value": _fmt_val(raw, fmt), "basis": basis}
 
 
-def series(now=None, fetch=None, window_s=1800, step_s=60):
+def _openai_model(fetch=None):
+    """The served model id from the OpenAI API, through the same fetch as everything else.
+
+    Needed because not every engine labels its /metrics series with ``model_name``: the
+    TensorFold engine publishes bare series, so the label probe in parse_engine comes back
+    empty while the card still has to say WHAT is being served. The exllamav3 path is the
+    mirror case (a /v1/models answer but no metrics at all), so the probe runs whenever the
+    exposition left the model unnamed -- it degrades to None and the dash stays honest.
+    """
+    base = ENGINE_URL.rsplit("/metrics", 1)[0]
+    try:
+        payload = json.loads((fetch or http_get)(base + "/v1/models").decode("utf-8", "replace"))
+        return ((payload.get("data") or [{}])[0] or {}).get("id") or None
+    except Exception:
+        return None
+
+
+def series(now=None, fetch=None, window_s=1800, step_s=60, family=None):
     """The engine's throughput over the requested window, memoised per window.
 
     A Prometheus that dies mid-loop must not produce a half-drawn chart that looks like traffic,
     so the loop breaks and the last real chart is served instead (the document's source block is
-    what says the source is down).
+    what says the source is down). The memoised document carries the metric-name family it was
+    built for: an engine swap must not be answered from a chart of the previous engine.
     """
     now = time.time() if now is None else now
     key = f"{int(window_s)}:{int(step_s)}"
     cached = _cache["series"].get(key)
-    if cached and (now - _cache["series_at"].get(key, 0.0)) < SERIES_CACHE_S:
+    if cached and _cache["series_family"].get(key) == family \
+            and (now - _cache["series_at"].get(key, 0.0)) < SERIES_CACHE_S:
         return cached
 
     start = int(now) - int(window_s)
@@ -367,7 +472,8 @@ def series(now=None, fetch=None, window_s=1800, step_s=60):
     out = []
     for skey, label in SERIES:
         try:
-            pts = prom_range(EXPR[skey], window_s=window_s, step_s=step_s, now=now, fetch=fetch)
+            pts = prom_range(expr_for(skey, family), window_s=window_s, step_s=step_s,
+                             now=now, fetch=fetch)
         except Exception:
             break
         values = on_grid(pts, start, int(step_s), n)
@@ -377,6 +483,7 @@ def series(now=None, fetch=None, window_s=1800, step_s=60):
     if out:
         _cache["series"][key] = out
         _cache["series_at"][key] = now
+        _cache["series_family"][key] = family
         return out
     return cached or []
 
@@ -425,25 +532,33 @@ def block(now=None, fetch=None, use_cache=True, window_s=1800, step_s=60):
         return dict(_cache["docs"][ckey])
 
     items: list = []
+    # ---- source 1: the engine itself (instantaneous gauges)
+    sums: dict = {}
+    family = None
     reachable = no_metrics = False
     model = None
     detail = ""
 
-    # ---- source 1: the engine itself (instantaneous gauges)
-    sums: dict = {}
     try:
         sums, model, _seen = parse_engine(fetch(ENGINE_URL).decode("utf-8", "replace"))
         reachable = True
         no_metrics = not sums
-        detail = "no metric series in the response" if no_metrics else f"{len(sums)} series"
+        family = detect_family(sums)
+        if model is None:
+            # Bare exposition (TensorFold) or a metrics-less engine (exllamav3): ask the
+            # OpenAI API what is being served before giving up on the name.
+            model = _openai_model(fetch)
+        detail = ("no metric series in the response" if no_metrics
+                  else f"{len(sums)} series ({family or 'unrecognised'} names)")
     except Exception as exc:
         detail = type(exc).__name__
     # The sampler reads the counters this call already parsed, so it costs no extra request.
-    note_single_stream(sums, now)
+    note_single_stream(sums, now, family)
     # Emitted even when the engine did not answer, so the key set does not change under a
-    # consumer that iterates it -- the VALUES are what goes missing, never the shape.
+    # consumer that iterates it -- the VALUES are what go missing, never the shape.
     for key, label, unit, metric, fmt in GAUGE_ITEMS:
-        items.append(_item(key, label, unit, sums.get(metric), fmt, "engine gauge, read now"))
+        items.append(_item(key, label, unit, sums.get(_m(metric, family)), fmt,
+                           "engine gauge, read now"))
     sources = [{"name": "engine", "url": ENGINE_URL,
                 "ok": reachable and not no_metrics, "detail": detail}]
 
@@ -454,18 +569,19 @@ def block(now=None, fetch=None, use_cache=True, window_s=1800, step_s=60):
         raw = None
         if prom_ok:
             try:
-                raw = instant(EXPR[key], fetch=fetch)
+                raw = instant(expr_for(key, family), fetch=fetch)
                 answered += 1
             except Exception as exc:
                 prom_ok = False
                 sources.append({"name": "prometheus", "url": PROM_URL, "ok": False,
                                 "detail": type(exc).__name__})
-        items.append(_item(key, label, unit, raw, fmt, basis))
+        items.append(_item(key, label, unit, raw, fmt,
+                           FAMILY_BASIS.get(family, {}).get(key, basis)))
     # ---- source 2b: the counter's own steps -- when it last generated, and how much
     gen_win = last_gen = None
     if prom_ok:
         try:
-            gen_win, last_gen = recent(now=now, fetch=fetch)
+            gen_win, last_gen = recent(now=now, fetch=fetch, family=family)
         except Exception as exc:
             prom_ok = False
             sources.append({"name": "prometheus", "url": PROM_URL, "ok": False,
@@ -510,7 +626,8 @@ def block(now=None, fetch=None, use_cache=True, window_s=1800, step_s=60):
         "items": items,
         # ...and the chart is not re-asked either: with the source already down, four more
         # range queries are four more timeouts. The last real chart is served instead.
-        "series": (series(now=now, fetch=fetch, window_s=window_s, step_s=step_s)
+        "series": (series(now=now, fetch=fetch, window_s=window_s, step_s=step_s,
+                          family=family)
                    if prom_ok else (_cache["series"].get(ckey) or [])),
         "series_keys": [k for k, _ in SERIES],
         "recorded": (f"Prometheus job {PROM_JOB} scrapes this same endpoint every 30 s and keeps "

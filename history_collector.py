@@ -298,7 +298,7 @@ def group_eval_types(runs):
     return out
 
 
-SOAK_MODEL = "EXL3 2.50bpw (r0b0tlab) — the deployed model on :18300"
+SOAK_MODEL = "EXL3 2.50bpw (r0b0tlab) — the model serving during the 2026-09-24 soak"
 SOAK_MODEL_ID = "Qwen3.8-Flash-Next"
 
 # Manual (non-machine-gradeable) families and where their verdicts live.

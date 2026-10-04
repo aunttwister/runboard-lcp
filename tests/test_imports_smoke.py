@@ -40,7 +40,7 @@ def test_sandbox_is_in_effect(sandbox):
 def test_baseline_is_the_contract_the_console_shows():
     import console_core as C
 
-    assert C.BASELINE == "vllm-cruz"
+    assert C.BASELINE == "tensorfold-glm53"
 
 
 def test_presets_are_the_four_the_console_offers():
@@ -53,10 +53,10 @@ def test_registry_catalogue_ids():
     import registry
 
     assert [e["id"] for e in registry.CATALOGUE] == [
-        "cruz", "vllm-cruz", "exl3-2.5bpw", "vllm-prod", "tensorfold"]
+        "cruz", "vllm-cruz", "exl3-2.5bpw", "vllm-prod", "tensorfold", "tensorfold-glm53"]
     default = [e for e in registry.CATALOGUE if e.get("default")]
     assert len(default) == 1, "exactly one catalogue entry must be the default"
-    assert default[0]["id"] == "vllm-cruz"
+    assert default[0]["id"] == "tensorfold-glm53"
 
 
 def test_no_engine_list_has_drifted_from_the_catalogue():
@@ -76,7 +76,12 @@ def test_no_engine_list_has_drifted_from_the_catalogue():
     catalogue_switches = {e["switch"] for e in registry.CATALOGUE if e.get("switch")}
     console_switches = {v["switch"] for v in C.ENGINES.values() if v.get("switch")}
     assert catalogue_switches == console_switches
-    assert C.BASELINE in ids and C.BASELINE in catalogue_switches
+    # The baseline must be a real engine: a catalogue id whose serve.sh token exists.
+    # The id-space and the switch token-space are distinct (vllm-prod -> "vllm",
+    # tensorfold-glm53 -> "glm53"), so resolve rather than string-compare.
+    assert C.BASELINE in ids
+    base_switch = {e["switch"] for e in registry.CATALOGUE if e["id"] == C.BASELINE}
+    assert base_switch and base_switch <= catalogue_switches
 
 
 def test_serve_sh_knows_every_engine_the_catalogue_can_switch_to():

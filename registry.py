@@ -68,7 +68,7 @@ CATALOGUE = [
         # showed a false "OFF BASELINE". Rows are measured, never assumed: kit_140 is
         # absent because this engine has not run the frozen kit (smoke-20 graded 14/14).
         "banked": {"decode_tok_s": 55.0, "e2e_tok_s": 47.78},
-        "default": True,
+        "default": False,
     },
     {
         "id": "exl3-2.5bpw",
@@ -124,6 +124,27 @@ CATALOGUE = [
         "model_id": "Qwen3.8-Flash-Next",
         "banked": {},
         "default": False,
+    },
+    {
+        # The kit that has been serving :18300 since 2026-10-03: the TensorFold engine
+        # (v0.6.0 image) on the GLM-5.3-Flash EXL3 4bpw pack, tensor-parallel across BOTH
+        # DGX Sparks (this box is rank 0), with the DFlash2 drafter for MTP. Discovered the
+        # hard way: it was hand-started (plain `docker run`, restart policy "no") and every
+        # engine list in the toolchain named only the Qwen-era engines, so "what is serving"
+        # read "none" while 71 tok/s left the port.
+        "id": "tensorfold-glm53",
+        "label": "TensorFold v0.6.0 + GLM-5.3-Flash EXL3 4bpw (2x Spark, TP=2)",
+        "base_model": "GLM-5.3-Flash",
+        "engine": "TensorFold v0.6.0 (container, TP=2)",
+        "pack": "Mia-AiLab/GLM-5.3-Flash-EXL3-4bpw-TensorFold",
+        "revision": "078455ffe6472f9a52fbc1139f58b9db2881b25c",
+        "path": str(HF_CACHE / "models--Mia-AiLab--GLM-5.3-Flash-EXL3-4bpw-TensorFold"),
+        "kind": "docker",
+        "unit": "glm53-flash-tf",
+        "switch": "glm53",
+        "model_id": "GLM-5.3-Flash-EXL3",
+        "banked": {},
+        "default": True,
     },
 ]
 
@@ -198,10 +219,17 @@ def live_engine() -> dict:
             info["unit"] = entry["unit"]
             break
     else:
-        status = _run(["docker", "inspect", "-f", "{{.State.Status}}", "vllm-fn-tp1"])
-        if status == "running":
-            info["target"] = "vllm-prod"
-            info["container"] = "vllm-fn-tp1"
+        # Every docker-kind catalogue entry is probed, not one hardcoded container name:
+        # a second container engine (glm53-flash-tf) was invisible here for exactly that
+        # reason, and the list of things this box can serve lives in the catalogue alone.
+        for entry in CATALOGUE:
+            if entry["kind"] != "docker":
+                continue
+            status = _run(["docker", "inspect", "-f", "{{.State.Status}}", entry["unit"]])
+            if status == "running":
+                info["target"] = entry["id"]
+                info["container"] = entry["unit"]
+                break
 
     pid = None
     for line in _run(["ss", "-ltnp"]).splitlines():
@@ -238,6 +266,13 @@ def live_engine() -> dict:
         # it, so ask the server to name itself. Gated on healthy so we never probe a dark
         # port, and "None" stays available for "nothing to say".
         info["engine_build"] = _vllm_build()
+    if info["engine_build"] is None and info["container"]:
+        # A container engine that does not answer /version (the TensorFold engine doesn't)
+        # still names itself through its own image tag -- derived from the running
+        # container, never from a constant, so an image bump re-labels the panel for free.
+        image = _run(["docker", "inspect", "-f", "{{.Config.Image}}", info["container"]])
+        if image:
+            info["engine_build"] = f"container image {image}"
     return info
 
 

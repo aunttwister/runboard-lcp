@@ -46,7 +46,17 @@ def _serving(target: str = "vllm-prod", build: str = "vLLM", model_id: str = "qw
 
 
 def _serve_calls(calls, engine):
-    return [c for c in calls if c and c[0] == dispatcher.SERVE and c[-1] == engine]
+    """serve.sh invocations for a CATALOGUE id.
+
+    The two id-spaces differ (vllm-prod's token is 'vllm', tensorfold-glm53's is 'glm53'),
+    so resolve the token through the catalogue exactly as the dispatcher does.
+    """
+    token = engine
+    for entry in registry.CATALOGUE:
+        if entry["id"] == engine:
+            token = entry.get("switch") or engine
+            break
+    return [c for c in calls if c and c[0] == dispatcher.SERVE and c[-1] == token]
 
 
 def _run(override=None, default=(0, "serve.sh: engine up\n", "")):
@@ -183,8 +193,9 @@ def test_a_run_that_raises_still_restores_the_baseline(load_tree, calls, monkeyp
 
 def test_a_failed_restore_flags_the_box_as_off_baseline(load_tree, calls, monkeypatch):
     """A restore that returns non-zero must not be reported as if the box came back."""
+    _token = next(e["switch"] for e in registry.CATALOGUE if e["id"] == C.BASELINE)
     monkeypatch.setattr(dispatcher, "run",
-                        _run({C.BASELINE: (5, "", "serve.sh: no such engine")}))
+                        _run({_token: (5, "", "serve.sh: no such engine")}))
     monkeypatch.setattr(dispatcher, "live_engine", lambda: _serving("vllm-prod"))
     queue_job({"job_id": "m3", "action": "eval", "preset": "smoke-20", "engine": "current"},
               name="m3")

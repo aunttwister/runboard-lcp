@@ -71,3 +71,15 @@ def test_every_age_on_the_board_is_rendered_in_units_a_human_reads():
     src = page()
     assert "function agoShort(" in src, "the short-age helper is missing"
     assert "agoShort(age)" in src, "the badge does not use the short-age helper"
+
+
+def test_the_header_badge_states_what_serves_now_and_is_never_hardcoded():
+    """The header once claimed ':18300 now serves the Cruz fork' in static HTML -- and the
+    claim survived two engine swaps. What the port serves must be derived from the engine's
+    own API on every poll, never written into the page."""
+    src = page()
+    assert "serves the Cruz fork" not in src, "a hardcoded deployment claim is back on the page"
+    assert 'id="hdr-port"' in src, "the derived header badge is missing"
+    body = " ".join(src.split("function renderEngine")[1].split())
+    assert 'hdr.textContent = up ? (":18300 serves "' in body, \
+        "the header badge is not populated from the live engine document"

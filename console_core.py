@@ -158,6 +158,8 @@ ENGINES: dict[str, dict] = {
     "exl3": {"label": "stock exllamav3 + 2.50bpw", "switch": "exl3"},
     "vllm": {"label": "vLLM prod (NVFP4 + abliterated)", "switch": "vllm"},
     "tensorfold": {"label": "TensorFold v0.3.6.3 + MLX 4-bit MTP", "switch": "tensorfold"},
+    "tensorfold-glm53": {"label": "TensorFold v0.6.0 + GLM-5.3-Flash EXL3 4bpw (2x Spark TP=2)",
+                         "switch": "glm53"},
 }
 
 # Concurrent streams for an eval. The frozen runner multiplexes requests and states its
@@ -180,7 +182,13 @@ DEFAULT_WORKERS = {"frozen": 2, "lite": 1}
 # the exllamav3 fork becomes a switchable alternative -- otherwise every run would
 # "restore" a 10-minute engine load back onto the exllamav3 build the box is not
 # meant to be running.
-BASELINE = "vllm-cruz"
+#
+# Since 2026-10-03 the hosted model is the TensorFold GLM-5.3-Flash kit (2x Spark,
+# TP=2, DFlash2 drafter), and the Qwen-era engines are the switchable alternatives.
+# The baseline follows the hosted model: leaving it on vllm-cruz would make every
+# finished eval RESTORE the retired Qwen engine over the model the box is meant to
+# serve, and the console would banner the true state as "OFF BASELINE".
+BASELINE = "tensorfold-glm53"
 
 # Leave this much free after a download. The pack we run is 85 GB; an abliterated
 # NVFP4 pack is ~800 GB. A button that can fill the disk is not a feature.

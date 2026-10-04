@@ -19,7 +19,7 @@ import re
 SERVE_SH = pathlib.Path(__file__).resolve().parent.parent / "host" / "serve.sh"
 
 # Every engine that can hold :18300, by the variable serve.sh names it with.
-ENGINES = {"PROD", "CRUZ", "STOCK", "TF", "VLLM_EXL3"}
+ENGINES = {"PROD", "CRUZ", "STOCK", "TF", "VLLM_EXL3", "GLM"}
 
 # stop helper -> the engines it stops
 STOPPERS = {
@@ -27,6 +27,7 @@ STOPPERS = {
     "stop_exl3": {"CRUZ", "STOCK"},
     "stop_tensorfold": {"TF"},
     "stop_vllm_cruz": {"VLLM_EXL3"},
+    "stop_glm": {"GLM"},
 }
 
 # systemctl start "$CRUZ" / docker start "$PROD" / systemctl start "$TF"
@@ -59,7 +60,7 @@ def _arms() -> dict[str, str]:
 def test_the_dispatch_case_is_parsed_at_all():
     """Guard the guard: a regex that stops matching must not turn the next test vacuous."""
     arms = _arms()
-    assert {"vllm-cruz", "cruz", "exl3", "vllm", "tensorfold"} <= set(arms)
+    assert {"vllm-cruz", "cruz", "exl3", "vllm", "tensorfold", "glm53"} <= set(arms)
     assert STARTERS.findall(arms["tensorfold"]) == ["TF"]
 
 
