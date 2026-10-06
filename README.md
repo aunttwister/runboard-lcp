@@ -37,6 +37,9 @@ corrected_metrics.py  the one definition of aggregate throughput (tokens / wall 
 load_soak.py          the load-soak harness that produced the numbers on `/`.
 static/               the three pages (deployed flat into /root/load).
 systemd/              the units, as installed on the box.
+monitor/              one monitoring container per Spark (see monitor/README.md). Each GB10
+                      box serves one engine in parallel (TP=2), so each carries its own
+                      exporter on :9400; the board reads the pair, not only this box.
 scripts/serve.sh      the engine switcher, as installed at /root/serve.sh.
 scripts/deploy.sh     ship this checkout to the box and smoke the endpoints.
 tests/                unit tests. See "Tests" below.

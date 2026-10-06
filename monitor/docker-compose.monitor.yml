@@ -1,0 +1,32 @@
+# Per-Spark monitoring container — deploy ONE of these on EACH Spark
+# (DGX Spark .107, EdgeXpert .108). Prometheus scrapes both on :9400.
+#
+#   docker compose -f docker-compose.monitor.yml up -d --build
+#
+# This file is intended to be copied to the Spark (see deploy.sh) and run THERE,
+# because the metrics come from the box's own nvidia-smi and /proc — they cannot
+# be sampled from a remote host.
+#
+# Host network: the exporter must bind the box's :9400 and must resolve
+# 127.0.0.1:18300 to the box's engine for `zgx_serving_up`.
+services:
+  spark-monitor:
+    build: .
+    image: spark-monitor:1
+    container_name: spark-monitor
+    restart: unless-stopped
+    network_mode: host
+    # /root/load exists only on the box that runs the load harness (.107). On a box
+    # without it the bind mounts an empty dir and the load-run gauges are simply
+    # omitted — which is the exporter's documented behaviour, not an error.
+    volumes:
+      - /root/load:/root/load:ro
+    environment:
+      - TZ=Europe/Belgrade
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

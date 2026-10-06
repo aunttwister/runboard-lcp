@@ -88,6 +88,22 @@
       an interval that carried no such traffic — never a zero.</div>
   </div>
 
+  <div class="card wide">
+    <h2>Boxes — per-Spark telemetry <span class="badge" id="boxes-src">…</span></h2>
+    <table id="boxes">
+      <thead><tr><th>box</th><th>role</th><th>GPU temp °C</th><th>power W</th><th>util %</th>
+      <th>clock MHz</th><th>mem free GB</th><th>exporter</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div class="note">Two GB10 boxes serve one engine in parallel (TP=2), so each runs its own
+      monitoring container — <code>monitor/</code> in this repo — serving the same exporter on :9400.
+      The board reads the PAIR, not only the box it happens to run on: a one-box view reports half the
+      machine as though it were the whole, and the unseen half is where a thermal event hides. Temp is
+      coloured at 82 °C (warn) and 85 °C (critical — the pair's published shutdown zone). A box that
+      does not answer shows a dash, never a zero, because 0 °C on an unreachable Spark reads exactly
+      like a cold one.</div>
+  </div>
+
   <div class="card">
     <h2>Throughput <span class="badge" id="tps-src">…</span></h2>
     <div class="kpis">
@@ -111,8 +127,8 @@
     </div>
     <canvas id="c-pow"></canvas>
     <div class="note">2 s cadence on the serve host. On GB10 utilisation is effectively binary, so power is the real load discriminator.</div>
-    <div class="note">Recorded by the <em>soak</em> run, not sampled now — these are the soak's last written samples. Live
-      machine values are in the strip at the top of this page on every view.</div>
+    <div class="note">Recorded by the <em>soak</em> run, not sampled now — these are the soak's last written samples.
+      Live per-box machine values are in the <strong>Boxes</strong> card above, one row per Spark.</div>
   </div>
 
   <div class="card wide">
@@ -145,6 +161,49 @@ function agoShort(s) {
 }
 
 function fmt(v, d) { return (v === null || v === undefined || Number.isNaN(v)) ? "—" : Number(v).toFixed(d === undefined ? 2 : d); }
+
+function esc(s) {
+  return String(s === null || s === undefined ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// One cell of the Boxes table. An absent value is a DASH, never a 0: 0 °C on an unreachable
+// Spark is indistinguishable from a cold one, and this board's whole job is not to say that.
+function boxCell(box, key, digits) {
+  const it = (box.items || []).find((x) => x.key === key);
+  if (!it || it.value === null || it.value === undefined) return '<span class="bad">—</span>';
+  const v = Number(it.value);
+  let s = digits === undefined ? String(it.value) : v.toFixed(digits);
+  // Temp is the reason this card exists, so it carries the verdict: 82 °C warn, 85 °C critical
+  // (the pair's published shutdown zone). Other columns are plain numbers.
+  if (key === "gpu_temp") s = '<span class="' + (v >= 85 ? "bad" : v >= 82 ? "warn" : "ok") + '">' + s + "</span>";
+  return s;
+}
+
+function renderBoxes(live) {
+  const tb = document.querySelector("#boxes tbody");
+  if (!tb) return;
+  const boxes = (live && live.boxes) || [];
+  const down = boxes.filter((b) => b.ok === false).length;
+  const badge = $("boxes-src");
+  if (badge) {
+    badge.textContent = boxes.length ? (boxes.length - down) + "/" + boxes.length + " answering" : "no boxes";
+    badge.className = "badge " + (boxes.length && !down ? "live" : "stale");
+  }
+  const dim = ' style="color:var(--dim)"';
+  tb.innerHTML = boxes.length ? boxes.map((b) => "<tr>"
+    + "<td>" + esc(b.label) + "<span" + dim + "> " + esc(b.addr || "") + "</span></td>"
+    + "<td>" + esc(b.role || "") + "</td>"
+    + "<td>" + boxCell(b, "gpu_temp") + "</td>"
+    + "<td>" + boxCell(b, "gpu_power", 1) + "</td>"
+    + "<td>" + boxCell(b, "gpu_util") + "</td>"
+    + "<td>" + boxCell(b, "gpu_clock") + "</td>"
+    + "<td>" + boxCell(b, "mem_avail", 1) + "</td>"
+    + "<td>" + (b.ok ? '<span class="ok">up</span>'
+                     : '<span class="bad">' + esc(b.detail || "down") + "</span>") + "</td>"
+    + "</tr>").join("")
+    : '<tr><td colspan="8" class="bad">no boxes reported in the live document</td></tr>';
+}
 
 // size to the CONTENT box, not the border box: sizing to the border box makes the
 // canvas overflow the card by the padding width (a known silent-blank-chart cause).
@@ -385,6 +444,7 @@ async function poll() {
     if (rl.status === "fulfilled" && rl.value.ok) {
       try { lastLive = await rl.value.json(); } catch (e) { /* keep the previous live doc */ }
       renderEngine(lastLive);
+      renderBoxes(lastLive);
     }
     if (rs.status !== "fulfilled" || !rs.value.ok) {
       throw new Error("state HTTP " + (rs.status === "fulfilled" ? rs.value.status : "?"));
@@ -411,7 +471,7 @@ async function poll() {
   } catch (e) {
     $("feed").innerHTML = '<span class="err">feed error: ' + String(e) + "</span>" +
       (lastGood ? " (showing last good state)" : "");
-    if (lastLive) renderEngine(lastLive);
+    if (lastLive) { renderEngine(lastLive); renderBoxes(lastLive); }
     if (lastGood) render(lastGood, lastLive);
   }
 }

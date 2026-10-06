@@ -1,10 +1,20 @@
 #!/usr/bin/env python3
-"""zgx-exporter — Prometheus exporter for the DGX Spark (GB10) inference box.
+"""zgx-exporter — Prometheus exporter for a DGX Spark / EdgeXpert (GB10) inference box.
+
+This is the canonical exporter. Each GB10 box runs ONE of these, as a container defined
+by `monitor/` in this repo (see monitor/README.md), and Prometheus scrapes every box on
+:9400. Before 2026-10-06 only `.107` ran one, so half the TP=2 pair had no thermal
+telemetry at all and the board could only see the box it happened to run on.
+
+The `corrected_metrics` import is guarded so the process still starts if that module is
+absent; the container bundles it, so in practice it never is — and monitor/deploy.sh
+copies both files from this checkout root, so the image ships the same exporter the
+tests below exercise.
 
 Why this exists: Prometheus pulls from a scrape target, and the EXL3 serving path
 (exllamav3's stdlib http.server) has no /metrics endpoint at all, so nothing on
-.107 can be scraped while EXL3 is serving. The previous vLLM target
-(http://192.168.1.107:18300/metrics) is therefore down for the whole EXL3 window,
+the box can be scraped while EXL3 is serving. The previous vLLM target
+(http://<box>:18300/metrics) is therefore down for the whole EXL3 window,
 which is why the ZGX dashboard had no data.
 
 This serves, on one port:
@@ -14,13 +24,16 @@ This serves, on one port:
   * load-run metrics, read from the load soak's state.json when it exists;
   * a serving health gauge for :18300.
 
-Stdlib only, deliberately: it must run under the host python with no venv, and a
-web bug here can only ever produce wrong numbers, never touch the run.
+Stdlib only, deliberately: a web bug here can only ever produce wrong numbers,
+never touch the run.
 
 Honesty rules followed here:
   * a metric that cannot be sampled is OMITTED, never reported as 0 — a fake zero
     on a power or throughput graph is indistinguishable from a real idle reading;
   * `zgx_load_state_age_seconds` is exposed so a stale run is visible as stale.
+
+Runs with host networking so `127.0.0.1:18300` means the box's engine (not the
+container's own loopback) — that is what makes `zgx_serving_up` truthful.
 """
 import json
 import os
@@ -31,7 +44,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from corrected_metrics import overlay as _correct   # noqa: E402
+try:
+    from corrected_metrics import overlay as _correct   # noqa: E402
+except Exception:                                       # module absent -> no correction
+    def _correct(state):                                # noqa: E306
+        return state
 
 PORT = 9400
 STATE = Path(os.environ.get("RUNBOARD_LOAD", "/root/load")) / "run/state.json"

@@ -572,9 +572,20 @@ function renderLive(d) {
   const exporter = bySrc.exporter || {}, prom = bySrc.prometheus || {};
   const run = d.run || {};
 
-  $("live-machine").innerHTML = (d.machine || []).length
-    ? d.machine.map(it => liveChip(it, false)).join("")
-    : '<div class="hint">no machine series — the exporter returned nothing</div>';
+  // Per box, so a reading can never be attributed to the wrong Spark. Falls back to the single
+  // `machine` block (the head box) when `boxes` is absent. A box that did not answer contributes
+  // one dashed chip labelled unreachable -- never zeros, which would read as a cold idle machine.
+  const boxes = (d.boxes || []).length
+    ? d.boxes
+    : [{ key: "head", label: "this box", ok: (d.machine || []).length > 0, items: d.machine || [] }];
+  $("live-machine").innerHTML = boxes.map(b =>
+    (b.ok === false
+      ? '<div class="chip stale"><span class="k">' + esc(b.label) + ' unreachable</span>' +
+        '<span class="v"><span class="bad">&mdash;</span></span></div>'
+      : "") +
+    (b.items || []).map(it => liveChip(
+      { label: b.label + " " + it.label, unit: it.unit, value: it.value }, false)).join("")
+  ).join("");
 
   // Not live unless a run is actually running: stale numbers are faded and labelled,
   // never presented as current traffic.

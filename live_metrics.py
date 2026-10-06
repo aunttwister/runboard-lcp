@@ -80,6 +80,38 @@ MACHINE = [
     ("mem_avail", "Unified mem free", "GB", "zgx_memory_available_bytes", "gb"),
 ]
 
+# ---- the boxes ---------------------------------------------------------------
+# One monitoring container per Spark (see monitor/), each serving the SAME exporter on
+# :9400. The board reads EVERY box's own exporter, not only the one it happens to run on:
+# with a TP=2 pair, a one-box view reports half the machine as though it were the whole,
+# and the unseen half is exactly where a thermal event hides. Measured 2026-10-06, before
+# this existed: the worker box had no exporter at all, so half the pair was invisible.
+#
+#     (key, label, address, exporter url, role)
+DEFAULT_BOXES = [
+    ("head", "DGX Spark", "192.168.1.107", "http://127.0.0.1:9400/metrics", "TP rank 0 · head"),
+    ("worker", "EdgeXpert", "192.168.1.108", "http://192.168.1.108:9400/metrics", "TP rank 1 · worker"),
+]
+
+
+def boxes_spec():
+    """The box list, overridable per deployment.
+
+    ``RUNBOARD_BOXES="key|label|addr|url|role;..."`` replaces the default set, so a test (or a
+    second rack) never has to edit this module. A malformed entry is SKIPPED rather than
+    guessed at -- inventing a box would put a machine on the page that does not exist.
+    """
+    raw = os.environ.get("RUNBOARD_BOXES")
+    if not raw:
+        return list(DEFAULT_BOXES)
+    out = []
+    for chunk in raw.split(";"):
+        parts = [p.strip() for p in chunk.split("|")]
+        if len(parts) == 5 and all(parts):
+            out.append((parts[0], parts[1], parts[2], parts[3], parts[4]))
+    return out or list(DEFAULT_BOXES)
+
+
 # (key, label, unit, exporter metric, format) -- only meaningful during a load run.
 RUN_ITEMS = [
     ("concurrency", "Concurrency", "", "zgx_load_phase_concurrency", "int"),
@@ -216,6 +248,37 @@ def _items(spec, plain):
     return out
 
 
+def _box_block(spec, fetch, head_url=None):
+    """(entries, head_plain) -- one entry per box, plus the HEAD box's parsed series.
+
+    Current values come from each box's OWN exporter. A box that does not answer keeps
+    ``ok: False`` and carries NO values -- every item is None and the page draws a dash. A
+    0 °C reading from an unreachable Spark would be indistinguishable from a cold one, which
+    is the one lie this board must not tell.
+
+    The head's parsed series are RETURNED rather than re-fetched later: the load block below
+    is about this box (the one the soak harness writes for), and reading the same URL twice
+    per request is a second chance for the page to disagree with itself.
+    """
+    entries, head_plain = [], {}
+    for idx, (key, label, addr, url, role) in enumerate(spec):
+        if idx == 0 and head_url:
+            url = head_url
+        entry = {"key": key, "label": label, "addr": addr, "role": role, "url": url,
+                 "ok": False, "detail": "not read", "items": _items(MACHINE, {})}
+        try:
+            parsed, _labelled = parse_prom_text(fetch(url).decode("utf-8"))
+            if idx == 0:
+                head_plain = parsed
+            entry["ok"] = True
+            entry["detail"] = f"{len(parsed)} series"
+            entry["items"] = _items(MACHINE, parsed)
+        except Exception as exc:
+            entry["detail"] = type(exc).__name__
+        entries.append(entry)
+    return entries, head_plain
+
+
 def _job_block(status):
     """The dispatcher's own view of whether a run is active.
 
@@ -240,7 +303,7 @@ def _job_block(status):
 
 
 def build_live(now=None, fetch=None, exporter_url=None, sparks=None, window=None, job=None,
-               presets=None):
+               presets=None, box_specs=None):
     """Assemble the /api/live document. Never raises: a dead source degrades the page.
 
     `sparks` lets the caller pass cached series in; when it is None the range queries
@@ -250,13 +313,15 @@ def build_live(now=None, fetch=None, exporter_url=None, sparks=None, window=None
     actually in progress (see _job_block).
     `presets` is console_core.PRESETS, passed in rather than imported so the modules stay
     standalone; it supplies each preset's row count for the throughput block.
+    `exporter_url` overrides the HEAD box's exporter (a test/deployment seam);
+    `box_specs` replaces the whole box list (see boxes_spec).
     """
     fetch = fetch or (lambda u: http_get(u))
     now = time.time() if now is None else now
     wname, wsecs, wstep = window_spec(window)
     doc = {"schema": "zgx.console.live.v1", "fetched_utc":
            time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now)),
-           "sources": [], "machine": [], "run": {}, "sparks": [],
+           "sources": [], "machine": [], "boxes": [], "run": {}, "sparks": [],
            "unavailable": UNAVAILABLE, "metrics_note": engine_metrics_note(fetch),
            "age_s": None,
            "window": wname, "window_s": wsecs, "step_s": wstep,
@@ -281,18 +346,27 @@ def build_live(now=None, fetch=None, exporter_url=None, sparks=None, window=None
                            "ok": bool(engine["reachable"]),
                            "detail": engine["sources"][0]["detail"]})
 
-    # ---- source 1: the local exporter (current values)
-    plain = {}
-    try:
-        text = fetch(exporter_url or EXPORTER_URL).decode("utf-8")
-        plain, _labelled = parse_prom_text(text)
-        doc["sources"].append({"name": "exporter", "url": exporter_url or EXPORTER_URL,
-                               "ok": True, "detail": f"{len(plain)} series"})
-    except Exception as exc:
-        doc["sources"].append({"name": "exporter", "url": exporter_url or EXPORTER_URL,
-                               "ok": False, "detail": f"{type(exc).__name__}"})
-
-    doc["machine"] = _items(MACHINE, plain)
+    # ---- source 1: EVERY box's own exporter (current values, one monitoring container per
+    # Spark -- see monitor/). `plain` stays exactly what it always was: the series of the box
+    # this server runs on, which is the one the soak harness writes for.
+    spec = box_specs if box_specs is not None else boxes_spec()
+    doc["boxes"], plain = _box_block(spec, fetch, head_url=exporter_url)
+    if not doc["boxes"]:
+        # No boxes configured at all: still emit one entry with no values, so a reader never
+        # has to treat "empty list" and "the box is down" as the same thing.
+        doc["boxes"] = [{"key": "none", "label": "no boxes configured", "addr": "", "role": "",
+                         "url": exporter_url or EXPORTER_URL, "ok": False,
+                         "detail": "no boxes configured", "items": _items(MACHINE, {})}]
+    head = doc["boxes"][0]
+    # `machine` stays the HEAD box's items: the one-box document the console chips read. Every
+    # box also appears under `boxes`, so nothing that wants only this box has to change and
+    # nothing that wants the pair has to guess which one it got.
+    doc["machine"] = head["items"]
+    doc["sources"].append({"name": "exporter", "url": head["url"], "ok": bool(head["ok"]),
+                           "detail": head["detail"]})
+    for b in doc["boxes"][1:]:
+        doc["sources"].append({"name": "exporter:" + b["key"], "url": b["url"],
+                               "ok": bool(b["ok"]), "detail": b["detail"]})
 
     # ---- the load block: only "live" while a run is actually running
     running = plain.get("zgx_load_running")

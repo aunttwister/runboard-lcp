@@ -26,6 +26,38 @@ def _run_stdout(stdout, rc=0):
     return P
 
 
+# ---------------------------------------------------------------- import guard
+
+def test_the_exporter_starts_and_passes_state_through_when_corrected_metrics_is_absent():
+    """The guarded import is the only reason a container can boot without the module.
+
+    A bare `from corrected_metrics import overlay` turns a missing module into an
+    ImportError at start-up -- the exporter dies and the box goes dark, which is the exact
+    failure the container exists to prevent. Reloaded under a throwaway name so the real
+    module other tests import is untouched.
+    """
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    src = Path(X.__file__).resolve()
+    saved = sys.modules.get("corrected_metrics")
+    sys.modules["corrected_metrics"] = None  # None in sys.modules makes the import raise
+    try:
+        spec = importlib.util.spec_from_file_location("zgx_exporter_no_corrected", src)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+    finally:
+        if saved is None:
+            sys.modules.pop("corrected_metrics", None)
+        else:
+            sys.modules["corrected_metrics"] = saved
+    # the fallback is the IDENTITY: no correction is applied, the state is passed through
+    # rather than silently replaced by an empty document.
+    state = {"runs": [{"a": 1}]}
+    assert mod._correct(state) == state
+
+
 # ---------------------------------------------------------------- gauge
 
 def test_gauge_omits_a_metric_it_cannot_sample():

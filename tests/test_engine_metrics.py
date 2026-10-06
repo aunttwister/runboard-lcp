@@ -431,7 +431,8 @@ def test_the_engine_card_is_rendered_from_the_live_document_alone():
     body = " ".join(PAGE.split("async function poll()")[1].split())
     wiring = ("if (rl.status === \"fulfilled\" && rl.value.ok) { "
               "try { lastLive = await rl.value.json(); } "
-              "catch (e) { /* keep the previous live doc */ } renderEngine(lastLive); }")
+              "catch (e) { /* keep the previous live doc */ } "
+              "renderEngine(lastLive); renderBoxes(lastLive); }")
     assert wiring in body, "the engine card is not drawn unconditionally from /api/live"
     assert body.index(wiring) < body.index('throw new Error("state HTTP')
 
