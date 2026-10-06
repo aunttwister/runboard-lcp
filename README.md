@@ -8,7 +8,7 @@ Three views and one JSON surface, all served by a single stdlib HTTP server on p
 
 | path | what it is |
 |---|---|
-| `/` | now, and only now — engine load (every request, run or not: output/prefill/decode throughput, the decode trio, lanes in use against the engine's own cap, last-generation recency) and per-Spark telemetry. Fetches `/api/live` and nothing else. |
+| `/` | now, and only now — engine load (every request, run or not: the decode pair — single stream / aggregate — prefill, lanes in use against the engine's own cap, last-generation recency), refreshed once a second, and per-Spark telemetry. Fetches `/api/live` and nothing else. |
 | `/history` | every banked run, ranked inside its own kit — plus the load-soak archive with its date, its model and its thermal envelope |
 | `/console` | switch engine, queue an eval, search HuggingFace and download a pack |
 | `/api/state` `/api/history` `/api/models` `/api/dispatch` `/api/live` | the JSON behind those pages |
@@ -38,9 +38,10 @@ live_server.py        the read-only HTTP server (:18400). Pages + JSON. Executes
 dispatcher.py         the executor. Runs as load-dispatch.service on a 15s timer.
 history_collector.py  folds run artifacts into run/history.json for /history.
 zgx_exporter.py       Prometheus exporter (:9400) for the Grafana dashboard.
-engine_metrics.py     what the SERVING ENGINE is doing right now: prefill/decode/output tok/s, the
-                      decode trio (one stream alone / one stream while N share, live and
-                      measured), TTFT, KV occupancy, prefix-cache hit rate, MTP acceptance, lanes
+engine_metrics.py     what the SERVING ENGINE is doing right now: the decode PAIR (single stream =
+                      generated tokens per second of decode time; aggregate = generated tokens per
+                      second of wall clock for the whole engine), prefill tok/s, TTFT, KV occupancy,
+                      prefix-cache hit rate, MTP acceptance, lanes
                       in use against the engine's own `--parallel` cap -- read off :18300 and
                       Prometheus (job zgx-vllm), so the page answers "what is the box doing" with
                       no eval running. Metric names are aliased per engine family
@@ -103,16 +104,33 @@ These are not style preferences; each one is the fix for something that actually
 11. **A per-stream rate is meaningless without the regime it was measured in.** "decode tok/s" can
    mean *one stream with the box to itself* or *one stream while seven others share it*, and those
    differ by an order of magnitude -- printing either without saying which is a claim the number
-   cannot support. So the card carries the trio (alone / while N share, live / while N share,
-   measured) **and** the lane pair (`in use` against the engine's own cap) that says which regime
-   is current; the number to read is the ratio, and 1.0 means concurrency bought nothing. This also
-   fixes what a dash means there: `ss_decode_tps` is a dash whenever the box had company, because a
-   single-stream speed measured while other streams were running is not a single-stream speed.
+   cannot support. The engine card therefore carries **two** numbers and only two (operator,
+   2026-10-06: "can we just have 19.11 tps decode single stream, 80 tps decode aggregate. Simplify
+   it."): `single stream` = generated tokens per second of *decode time* (the per-stream speed, which
+   does not sag when lanes share) and `aggregate` = generated tokens per second of *wall clock* for
+   the whole engine. The lane pair above (`in use` against the engine's own cap) says which regime
+   you are looking at.
+   They are **two independent measurements over two different counter families**, so do not divide
+   one by the other and read the lane count: measured 2026-10-06 that quotient came out at 6.6 while
+   four lanes were held and 5.9 while eight were held, because the numerator counts only *finished*
+   requests while the aggregate covers the whole engine. Two answers, not a ratio.
+   An earlier revision of this card that same day carried a third reading ("one stream, alone") and a
+   derived per-stream rate. Both measured the same quantity as the pair and the operator asked for
+   them to go, so they now sit in the collapsed diagnostics row rather than being deleted outright.
    Corollary, learned on 2026-10-06: a metric name missing from `FAMILY_ALIASES` raises nothing --
    the expression simply matches nothing and the KPI dashes forever, which on this card reads as
    "no decode happened" (`decode_tps` did exactly that against the TensorFold engine).
    `test_every_name_the_card_queries_is_a_name_this_engine_publishes` is the guard: every name in
    every expression must appear in the engine's own captured inventory.
+12. **Refresh as fast as the operator watches, and pay for it at the socket.** `/` polls once a
+   second (operator, 2026-10-06: "the entire engine load must be live and refreshed once per
+   second"). The next poll is scheduled from the END of the previous one rather than handed to
+   `setInterval`: this page is served by the box that is running the engine, so a fixed interval
+   would fire again while a slow response was still in flight and pile requests onto the engine.
+   Every response of 1 KB or more is gzipped when the client asks for it (~4:1 on the live
+   document), which is what makes three times the refresh rate cost *less* bandwidth than the 3 s
+   poll it replaced: 6.9 -> 4.4 KiB/s per open tab, and the two pollers the page runs (1 s card,
+   10 s chrome strip) are accounted for in that figure.
 
 ## Running it
 

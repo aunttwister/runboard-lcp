@@ -6,6 +6,7 @@ token, because the whole point of the live card is that it opens on a phone.
 """
 from __future__ import annotations
 
+import gzip
 import json
 
 import live_server
@@ -86,3 +87,45 @@ def test_live_route_passes_the_dispatcher_status_so_a_run_is_not_called_idle(mon
     assert status == 200
     assert seen["job"]["state"] == "running"
     assert seen["job"]["job"]["job_id"] == "jx"
+
+
+# ------------------------------------------------------------------ compression
+#
+# The live document is ~16 KB and the page now asks for it once a second, which would be ~16 KB/s
+# per open tab uncompressed -- more than the page cost before it was consolidated. Measured 4:1 in
+# practice (16,399 B -> 4,072 B), so the faster poll is paid for at the socket rather than by
+# cutting what the page is allowed to show.
+
+BIG = {"schema": "zgx.console.live.v1", "pad": "x" * 4000}
+
+
+def test_a_large_body_goes_out_gzipped_when_the_client_accepts_it(monkeypatch):
+    monkeypatch.setattr(live_server.LM, "live_doc", lambda **kw: BIG)
+    status, headers, body = request(H, "GET", "/api/live", headers={"Accept-Encoding": "gzip"})
+    assert status == 200
+    assert headers["content-encoding"] == "gzip"
+    assert headers["vary"] == "Accept-Encoding"
+    assert headers["content-type"] == "application/json"
+    # Content-Length must describe what was actually sent, or the client truncates or hangs.
+    assert int(headers["content-length"]) == len(body)
+    assert json.loads(gzip.decompress(body)) == BIG
+    assert len(body) < len(json.dumps(BIG)) // 4, "the body is not meaningfully compressed"
+
+
+def test_a_client_that_did_not_ask_for_gzip_gets_plain_json(monkeypatch):
+    """Compression is negotiated, never assumed: no header, no gzip, no `Vary` claim either."""
+    monkeypatch.setattr(live_server.LM, "live_doc", lambda **kw: BIG)
+    status, headers, body = request(H, "GET", "/api/live")
+    assert status == 200
+    assert "content-encoding" not in headers
+    assert "vary" not in headers
+    assert int(headers["content-length"]) == len(body)
+    assert json.loads(body) == BIG
+
+
+def test_a_small_body_is_not_compressed_even_when_the_client_asks():
+    """Below GZIP_MIN the framing is the larger half, so /health stays as it is."""
+    status, headers, body = request(H, "GET", "/health", headers={"Accept-Encoding": "gzip"})
+    assert status == 200
+    assert "content-encoding" not in headers
+    assert json.loads(body) == {"ok": True}

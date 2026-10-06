@@ -472,17 +472,54 @@ def test_the_card_renders_every_number_the_module_publishes():
 
 def test_the_numbers_the_operator_asked_to_watch_are_not_behind_the_disclosure():
     """Requested 2026-10-06: "decode single stream, decode concurrent and number of concurrent
-    params".
+    params" -- then narrowed the same day to "can we just have 19.11 tps decode single stream,
+    80 tps decode aggregate. Simplify it."
 
     The collapsed row is a promise that what sits inside it is diagnostic rather than watched, so a
     number somebody asked to watch has to be readable without opening anything. This is the guard
     that stops a promoted KPI sliding back behind the disclosure: the ids are asserted on the
     markup BEFORE it, not merely somewhere on the page.
+
+    The revision deliberately MOVED two ids out of this set. `k-eng-ss` and `k-eng-stream` measured
+    the same thing as the requested pair and were what the operator asked to be rid of, so they now
+    sit in the collapsed row on purpose. If this test fails because somebody re-added them here,
+    check whether a third number was actually asked for again.
     """
     primary = PAGE.split('id="eng-more"')[0]
     assert primary, "the disclosure marker moved; this guard would now assert nothing"
-    for ident in ("k-eng-run", "k-eng-max", "k-eng-ss", "k-eng-stream", "k-eng-dec"):
+    for ident in ("k-eng-run", "k-eng-max", "k-eng-dec", "k-eng-out"):
         assert f'id="{ident}"' in primary, f"#{ident} is behind the disclosure, not on the card"
+
+
+def test_the_decode_readout_is_two_numbers_not_three():
+    """Operator, 2026-10-06: "can we just have 19.11 tps decode single stream, 80 tps decode
+    aggregate. Simplify it."
+
+    Three readings sat on the card and the operator asked for two, so the row is pinned to exactly
+    two cells with exactly those meanings, and the dropped third must not creep back. The pair is
+    pinned as a PAIR as well: a lone per-stream rate is the very thing this replaced, so both ids
+    have to share the row, with single stream first.
+    """
+    row = PAGE.split('class="kpis grp"')[1].split('<div class="charts">')[0]
+    assert row.count('class="kpi"') == 2, f"the decode row is not two numbers: {row!r}"
+    assert 'id="k-eng-dec"' in row and "decode tok/s — single stream" in row
+    assert 'id="k-eng-out"' in row and "decode tok/s — aggregate" in row
+    assert row.index('id="k-eng-dec"') < row.index('id="k-eng-out"'), "single stream must read first"
+    assert "one stream, alone" not in row, "the dropped third reading is back on the card"
+
+
+def test_the_live_page_refreshes_once_a_second_without_stacking_requests():
+    """Operator, 2026-10-06: "the entire engine load must be live and refreshed once per second."
+
+    Asserted as a PERIOD plus a scheduling rule, not as a number inside a setTimeout call. This page
+    is served by the same box that runs the engine, so a fixed one-second interval would fire again
+    while a slow response was still in flight and pile requests onto the engine -- the one thing a
+    faster poll must not do. The next poll has to be scheduled AFTER the previous one returns.
+    """
+    assert "const POLL_MS = 1000;" in PAGE, "the poll period is no longer one second"
+    assert "setInterval(poll" not in PAGE, "a fixed interval can stack polls on the engine box"
+    assert "POLL_MS - (Date.now() - t0)" in PAGE, "the period is not measured from the last poll"
+    assert "Math.max(200," in PAGE, "no floor: a slow server could turn the loop into a hot loop"
 
 
 def test_every_engine_card_id_exists_in_the_markup():
