@@ -8,7 +8,7 @@ Three views and one JSON surface, all served by a single stdlib HTTP server on p
 
 | path | what it is |
 |---|---|
-| `/` | now, and only now — engine load (every request, run or not: the decode pair — single stream / aggregate — prefill, lanes in use against the engine's own cap, last-generation recency), refreshed once a second, and per-Spark telemetry. Fetches `/api/live` and nothing else. |
+| `/` | now, and only now — engine load (every request, run or not: the decode pair — single stream / aggregate — prefill, DECODING lanes against the engine's own cap, last-generation recency), refreshed once a second, and per-Spark telemetry. Fetches `/api/live` and nothing else. |
 | `/history` | every banked run, ranked inside its own kit — plus the load-soak archive with its date, its model and its thermal envelope |
 | `/console` | switch engine, queue an eval, search HuggingFace and download a pack |
 | `/api/state` `/api/history` `/api/models` `/api/dispatch` `/api/live` | the JSON behind those pages |
@@ -41,8 +41,8 @@ zgx_exporter.py       Prometheus exporter (:9400) for the Grafana dashboard.
 engine_metrics.py     what the SERVING ENGINE is doing right now: the decode PAIR (single stream =
                       generated tokens per second of decode time; aggregate = generated tokens per
                       second of wall clock for the whole engine), prefill tok/s, TTFT, KV occupancy,
-                      prefix-cache hit rate, MTP acceptance, lanes
-                      in use against the engine's own `--parallel` cap -- read off :18300 and
+                      prefix-cache hit rate, MTP acceptance, DECODING lanes against the engine's
+                      own `--parallel` cap -- read off :18300 and
                       Prometheus (job zgx-vllm), so the page answers "what is the box doing" with
                       no eval running. Metric names are aliased per engine family
                       (FAMILY_ALIASES / FAMILY_EXPR); a name with no alias dashes silently, which
@@ -117,12 +117,48 @@ These are not style preferences; each one is the fix for something that actually
    An earlier revision of this card that same day carried a third reading ("one stream, alone") and a
    derived per-stream rate. Both measured the same quantity as the pair and the operator asked for
    them to go, so they now sit in the collapsed diagnostics row rather than being deleted outright.
+   **The pair is not a ratio, but neither is the concurrency a gauge you can guess at.** Two more
+   faults were fixed on 2026-10-06, both found by the operator reading the live card and saying
+   *"something's incorrect here"* -- and both were the card's, not the engine's:
+
+   * **`requests_running` is not a stream count.** The engine's own help text: *"Requests in prefill
+     or decode."* Sampling every 5 s for 120 s confirms
+     `requests_running == streams{state="decoding"} + streams{state="filling"}` exactly (means 6.21
+     == 5.75 + 0.46), so it counts requests parked in **prefill**, which emit no decode tokens. That
+     is how "8 concurrent streams" sits beside an aggregate *below* the single-stream rate: 8
+     requests held, well under one lane of real decode work. The card labels it honestly now and
+     shows `decoding` (a per-state gauge) as the concurrency. Reading one state out of a
+     multi-series metric needs a **label-qualified key**, which `parse_engine` keeps alongside the
+     bare name -- summing the three states answers a different question.
+   * **A per-stream rate divided out of a gauge is not a measurement.** `stream_tps`
+     (`output_tps / running`) is deleted. It divided a two-minute *time average* by an
+     *instantaneous snapshot*, describing no single moment: measured **1.21** tok/s against a true
+     per-lane **13.5**, and **48.4** against **16.1** an hour earlier -- arbitrary, not biased.
+     `decode_tps` (`tokens / decode seconds`) already is the per-stream rate.
+
+   Ground truth for the pair, measured over 120 s: **4.63 lanes** of decode work produced
+   **78.4 tok/s = 16.9 tok/s per lane**, with `decode_tps` reading 13--16.5. And note *why* the
+   aggregate can read low while the lanes are fast: it is a wall-clock average, so it sags toward
+   zero whenever the box pauses between requests -- 8 s windows were caught with **6 streams held
+   and zero tokens produced**. A low aggregate is idle time, not slow decoding.
+
    Corollary, learned on 2026-10-06: a metric name missing from `FAMILY_ALIASES` raises nothing --
    the expression simply matches nothing and the KPI dashes forever, which on this card reads as
    "no decode happened" (`decode_tps` did exactly that against the TensorFold engine).
    `test_every_name_the_card_queries_is_a_name_this_engine_publishes` is the guard: every name in
    every expression must appear in the engine's own captured inventory.
-12. **Refresh as fast as the operator watches, and pay for it at the socket.** `/` polls once a
+12. **Know the flush interval before you trust a rate off a counter.** The TensorFold engine does
+   not publish a continuously-updated counter: both `generation_tokens_total` and
+   `decode_seconds_total` advance in **lockstep lumps every ~8 s** (median of 11 gaps measured over
+   92 s: 16/8/6/8/10/8/2/8/6/6/6 s, the same list for both). A 2 m `rate()` therefore spans ~15
+   flushes, which is enough -- but read the consequence before drawing conclusions from a single
+   sample: the 1.7x spread observed on `output_tps` across 13 samples (102-170 tok/s against ~95
+   over 30 m) is **real load variation, not instrument noise**. The one number that stays stable
+   under lumping is a *ratio of two counters that lump together*, which is precisely why
+   `decode_tps` (13-17 across the same window) can be trusted while its numerator alone cannot.
+   Caution on the other side: `decode_seconds_total` integrates to as much as **10.5 lanes at 2 m
+   against an 8-lane cap**, so that denominator is good to roughly **+/-30 %**, not exact.
+13. **Refresh as fast as the operator watches, and pay for it at the socket.** `/` polls once a
    second (operator, 2026-10-06: "the entire engine load must be live and refreshed once per
    second"). The next poll is scheduled from the END of the previous one rather than handed to
    `setInterval`: this page is served by the box that is running the engine, so a fixed interval
