@@ -147,6 +147,8 @@ tensorfold_health:rounds_total 956209
 tensorfold_health:prefill_seconds_total 4712.6847
 tensorfold_health:decode_seconds_total 170711.6853
 tensorfold_health:streams{state="decoding"} 2
+tensorfold_health:streams{state="filling"} 0
+tensorfold_health:streams{state="paused"} 0
 tensorfold_health:context_length 1048576
 tensorfold_health:streams_max 8
 tensorfold_health:pool_tokens 1609728
@@ -181,7 +183,11 @@ def test_every_name_the_card_queries_is_a_name_this_engine_publishes():
     card: it renders as a dash, which is exactly what "nothing is happening" renders as.
     """
     published = set(EM.parse_engine(TENSORFOLD_TEXT.decode())[0])
-    assert len(published) == 25, "the fixture is no longer the engine's full inventory"
+    # 27 exposition lines: each contributes its bare name, and the six that carry a label
+    # contribute a label-qualified key as well (that key is how a per-state gauge is read).
+    # `streams` accounts for three of those labels -- decoding, filling, paused -- which is why
+    # the count is not simply the number of distinct metric names.
+    assert len(published) == 31, "the fixture is no longer the engine's full inventory"
 
     asked: dict[str, str] = {}
     for key, _label, _unit, _fmt, _basis in EM.RATE_ITEMS:
@@ -394,22 +400,64 @@ def test_prefill_throughput_counts_only_the_tokens_the_gpu_actually_computed():
     assert "request_prompt_tokens_sum" not in EM.EXPR["prefill_tps"]
 
 
-def test_tok_per_stream_is_the_output_rate_over_requests_running():
-    """The number a reader asking "how fast does it generate" means: one client's share of the
-    engine. With a single stream it must equal the engine-wide rate, and with nothing running it
-    must be absent rather than 0 -- 0 tok/s per stream claims a measured idle stream."""
-    one = EM.block(now=1_000, fetch=route(values={"vllm:num_requests_running": "1"}), use_cache=False)
+def test_parse_engine_keeps_a_label_qualified_key_for_a_per_state_metric():
+    """`streams{state="decoding"}` must be readable ALONE, not as the sum of its three states.
+
+    The card needs "how many lanes are decoding"; summing decoding+filling+paused answers a
+    different question (how many stream slots are occupied). Without the label-qualified key the
+    two cannot be told apart, and the failure is silent -- a dash, which is exactly what "nothing
+    is running" also renders as.
+    """
+    text = ('tensorfold_health:streams{state="decoding"} 5\n'
+            'tensorfold_health:streams{state="filling"} 2\n'
+            'tensorfold_health:streams{state="paused"} 1\n')
+    sums, _model, _seen = EM.parse_engine(text)
+    assert sums['tensorfold_health:streams{state="decoding"}'] == 5.0
+    assert sums['tensorfold_health:streams{state="filling"}'] == 2.0
+    assert sums["tensorfold_health:streams"] == 8.0, "the bare name still totals every state"
+
+
+def test_the_concurrency_the_card_shows_is_decoding_lanes_not_the_request_count():
+    """Operator, 2026-10-06: "how do we have 8 concurrent streams when decode for single stream is
+    13.27 decode aggregate is 8.2.. somethings incorrect here".
+
+    Their instinct was right, and the fault was the LABEL. The eight was `requests_running`, which
+    the engine documents as "Requests in prefill or decode"; sampling confirms it equals
+    streams{decoding} + streams{filling}. It therefore counts requests parked in PREFILL, which
+    generate no decode tokens at all -- so a card dividing the aggregate by it reported 1.21 tok/s
+    per stream against a true per-lane 13.5. The gauge to show is the per-state one.
+    """
+    text = ('tensorfold:requests_running 8\n'
+            'tensorfold_health:streams{state="decoding"} 5\n'
+            'tensorfold_health:streams{state="filling"} 3\n')
+    b = EM.block(now=1_000, fetch=route(engine=text.encode(),
+                                        values={"generation_tokens_total[2m]": "100"}),
+                 use_cache=False)
+    items = {i["key"]: i for i in b["items"]}
+    assert set(items) == set(EM.ITEM_KEYS)
+    assert items["decoding"]["value"] == 5, "the card must show decoding lanes, not held requests"
+    assert items["running"]["value"] == 8, "the request count is still published, honestly labelled"
+    assert items["filling"]["value"] == 3
+    assert "prefill" in items["running"]["label"], "the mislabel is back: this counts prefill too"
+    assert "stream_tps" not in items, "the meaningless quotient is back"
+
+
+def test_the_per_stream_rate_is_measured_not_divided_by_a_gauge():
+    """Replaces `test_tok_per_stream_is_the_output_rate_over_requests_running`, which pinned the
+    opposite. That test was green over a defect: it asserted stream_tps == output_tps at
+    running == 1 and said nothing about running == 8, where the quotient mixed a two-minute time
+    average with an instantaneous snapshot and read 1.21 tok/s against a true 13.5.
+
+    The per-stream rate is `decode_tps` (tokens per second of DECODE TIME, from counters) and
+    `ss_decode_tps` (measured from single-request intervals). Neither divides by a gauge.
+    """
+    one = EM.block(now=1_000, fetch=route(values={"vllm:num_requests_running": "1"}),
+                   use_cache=False)
     items = {i["key"]: i for i in one["items"]}
     assert set(items) == set(EM.ITEM_KEYS), "the published key set is the contract"
-    assert items["stream_tps"]["value"] == items["output_tps"]["value"]
-
-    idle = EM.block(now=1_000, fetch=route(values={"vllm:num_requests_running": "0"}), use_cache=False)
-    assert {i["key"]: i for i in idle["items"]}["stream_tps"]["value"] is None
-
-    gone = EM.block(now=1_000, fetch=route(values={"vllm:num_requests_running": "0",
-                                                   "rate(vllm:generation_tokens_total": "None"}),
-                   use_cache=False)
-    assert {i["key"]: i for i in gone["items"]}["stream_tps"]["value"] is None
+    assert "stream_tps" not in items and "stream_tps" not in EM.ITEM_KEYS
+    assert '"stream_tps"' not in PAGE, "the page still wires a key the module no longer publishes"
+    assert not hasattr(EM, "_ratio"), "the helper that built the bogus quotient is still present"
 
 
 def test_prom_range_drops_values_that_are_not_numbers():
@@ -487,24 +535,28 @@ def test_the_numbers_the_operator_asked_to_watch_are_not_behind_the_disclosure()
     """
     primary = PAGE.split('id="eng-more"')[0]
     assert primary, "the disclosure marker moved; this guard would now assert nothing"
-    for ident in ("k-eng-run", "k-eng-max", "k-eng-dec", "k-eng-out"):
+    # k-eng-pre joined this set on 2026-10-06: the operator asked for prefill speeds, which
+    # makes it a watched number rather than a diagnostic one.
+    for ident in ("k-eng-run", "k-eng-max", "k-eng-dec", "k-eng-out", "k-eng-pre"):
         assert f'id="{ident}"' in primary, f"#{ident} is behind the disclosure, not on the card"
 
 
-def test_the_decode_readout_is_two_numbers_not_three():
+def test_the_throughput_row_is_two_decode_numbers_plus_prefill():
     """Operator, 2026-10-06: "can we just have 19.11 tps decode single stream, 80 tps decode
-    aggregate. Simplify it."
+    aggregate. Simplify it." -- then, the same hour: "we need prefill speeds too".
 
-    Three readings sat on the card and the operator asked for two, so the row is pinned to exactly
-    two cells with exactly those meanings, and the dropped third must not creep back. The pair is
-    pinned as a PAIR as well: a lone per-stream rate is the very thing this replaced, so both ids
-    have to share the row, with single stream first.
+    Two DECODE numbers, with prefill a third, DIFFERENT quantity rather than a third decode
+    reading. The guard therefore counts the cells that say "decode" (so a dropped or re-added
+    decode variant still fails) while allowing the prefill speed the operator asked for to sit
+    beside them, visible rather than behind the disclosure.
     """
     row = PAGE.split('class="kpis grp"')[1].split('<div class="charts">')[0]
-    assert row.count('class="kpi"') == 2, f"the decode row is not two numbers: {row!r}"
+    assert row.count('class="kpi"') == 3, f"the throughput row is not 2 decode + prefill: {row!r}"
+    assert row.count("decode tok/s") == 2, "a third decode reading crept back into the row"
     assert 'id="k-eng-dec"' in row and "decode tok/s — single stream" in row
     assert 'id="k-eng-out"' in row and "decode tok/s — aggregate" in row
     assert row.index('id="k-eng-dec"') < row.index('id="k-eng-out"'), "single stream must read first"
+    assert 'id="k-eng-pre"' in row and "prefill tok/s" in row, "prefill is not on the card"
     assert "one stream, alone" not in row, "the dropped third reading is back on the card"
 
 

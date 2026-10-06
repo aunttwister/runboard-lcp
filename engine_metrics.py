@@ -34,26 +34,33 @@ Honesty rules, the same three the rest of the board follows:
   * the engine behind the port is swappable and the EXL3 path publishes no /metrics at all, so
     availability is probed on every read and stated, never hardcoded.
 
-Three "decode" numbers, and each answers a different question (adding the second and third is
-what makes the first interpretable -- one of them alone is not a speed, it is a speed under an
-unnamed amount of sharing):
+The numbers, what each one measures, and the two readings that were WRONG here until
+2026-10-06 -- both were caught live, by the operator, from the card itself.
 
-  * ``ss_decode_tps``  -- how fast ONE request decodes when it has the engine to itself. Measured,
-    not divided: taken only from intervals in which exactly one request finished.
-  * ``stream_tps``     -- how fast one request decodes WHILE others are also decoding
-    (``output_tps / running``). The live number; present whenever anything is running.
-  * ``decode_tps``     -- the same per-stream speed as ``stream_tps``, but measured off the counters
-    (generated tokens per decode-second, i.e. per second of decode WORK, which sums the requests
-    that were decoding at the same time). Two independent estimates of one quantity: ``stream_tps``
-    is live and derived from a gauge, this one lags and is derived from finished requests. Note it
-    is NOT the engine-wide rate -- that is ``output_tps``, a factor of ``running`` larger.
-    Completion-windowed, so it is a dash while a long generation is in flight -- correct, not broken.
+  * ``output_tps``    -- generated tokens per second of WALL CLOCK for the whole engine. The
+    aggregate. It is a TIME AVERAGE, so it sags toward zero whenever the box pauses between
+    requests: a low aggregate is not slow decoding, it is mostly idle time.
+  * ``decode_tps``    -- generated tokens per second of DECODE TIME, summed over requests. A lane
+    that decodes for one second contributes one second, so dividing by it removes idle time and
+    yields the PER-STREAM rate (tokens per lane-second). It can therefore read HIGHER than
+    ``output_tps`` on a box that is mostly waiting, and that is correct, not a bug.
+    Ground truth, measured 2026-10-06: 4.63 lanes of decode work over 120 s produced 78.4 tok/s
+    = 16.9 tok/s per lane, with ``decode_tps`` reading 13--16.5.
+  * ``prefill_tps``   -- prompt tokens the GPU actually COMPUTED per second of prefill time.
+  * ``ss_decode_tps`` -- one request's decode speed, measured only from intervals in which exactly
+    one request finished. A dash most of the time on a busy box, by design.
 
-Read ``stream_tps`` (or ``decode_tps``) against ``ss_decode_tps`` and the batching gain is the
-ratio: 1.0 means concurrency bought nothing (the lanes are splitting a fixed budget), >1 means it
-did. ``ss_decode_tps`` only takes a value from intervals in which exactly ONE request was in
-flight, so on a box that always has company it is a dash most of the time -- by design, because a
-single-stream speed measured while other streams were running is not a single-stream speed.
+DELETED ON 2026-10-06: ``stream_tps`` (``output_tps / running``). It was meaningless -- a two
+minute time average divided by an instantaneous snapshot gauge, so the quotient describes no
+single moment. Measured 1.21 tok/s against a true per-lane 13.5, and 48.4 against 16.1 an hour
+earlier: arbitrary, not merely biased. ``decode_tps`` already IS the per-stream rate.
+
+CONCURRENCY: read ``decoding`` (``streams{state="decoding"}``), never ``running``. The engine
+documents ``tensorfold:requests_running`` as "Requests in prefill or decode", and sampling
+confirms ``requests_running == streams{decoding} + streams{filling}`` exactly -- it counts
+requests parked in PREFILL, which generate no decode tokens at all. That is how "8 concurrent
+streams" can sit beside an aggregate BELOW the single-stream rate: 8 requests held, well under
+one lane's worth of actual decode work.
 """
 from __future__ import annotations
 
@@ -78,13 +85,22 @@ SERIES_CACHE_S = float(os.environ.get("RUNBOARD_ENGINE_SERIES_CACHE_S", "30"))
 # Instantaneous gauges, read straight off the engine (one loopback call, no cache needed).
 # (key, label, unit, metric name, format)
 GAUGE_ITEMS = [
-    ("running", "Concurrent streams in use", "", "vllm:num_requests_running", "int"),
+    # The TRUE concurrency: lanes actually generating tokens, from the engine's per-state series.
+    # Kept separate from `running` because the two disagree and the difference is the whole reason
+    # an aggregate below the single-stream rate is possible.
+    ("decoding", "Streams decoding", "", "vllm:streams_decoding", "int"),
     # The lane count -- the `--parallel` the engine was actually started with, read from the
     # engine rather than assumed. It is half of the reading: 7 of 8 lanes busy and 7 of 8 lanes
     # free are the same number and opposite situations, so a throughput figure without the cap
     # beside it cannot be interpreted. An engine that publishes no cap leaves this a DASH, never
     # an invented number (see FAMILY_ALIASES -- the canonical name has no vLLM counterpart).
     ("streams_max", "Concurrent streams max", "", "vllm:streams_max", "int"),
+    # NOT the number of decoding streams. The engine HELP reads "Requests in prefill or decode",
+    # and sampling confirms requests_running == streams{decoding} + streams{filling}. It was
+    # labelled "concurrent streams in use" until 2026-10-06, and that mislabel is what made a
+    # card with correct arithmetic look broken.
+    ("running", "Requests in flight (prefill or decode)", "", "vllm:num_requests_running", "int"),
+    ("filling", "Streams pre-filling", "", "vllm:streams_filling", "int"),
     ("waiting", "Requests waiting", "", "vllm:num_requests_waiting", "int"),
     ("kv_pct", "KV cache used", "%", "vllm:kv_cache_usage_perc", "pct"),
 ]
@@ -152,6 +168,11 @@ FAMILY_ALIASES = {
         # canonical name resolves unchanged to a metric that does not exist and the card draws a
         # dash -- the honest answer to "what is the cap here", as against a plausible 0.
         "vllm:streams_max": "tensorfold_health:streams_max",
+        # Per-STATE stream counts. The label selector is part of the name here, which is why
+        # parse_engine keeps a label-qualified key as well as the bare one: summing the three
+        # states would answer a different question than "how many lanes are decoding".
+        "vllm:streams_decoding": 'tensorfold_health:streams{state="decoding"}',
+        "vllm:streams_filling": 'tensorfold_health:streams{state="filling"}',
         "vllm:num_requests_waiting": "tensorfold:requests_waiting",
         "vllm:kv_cache_usage_perc": "tensorfold:kv_cache_usage_ratio",
         "vllm:generation_tokens_total": "tensorfold:generation_tokens_total",
@@ -237,7 +258,7 @@ def expr_for(key: str, family) -> str:
 # traffic" and is exactly the failure this card exists to avoid.
 ITEM_KEYS = (tuple(k for k, *_ in GAUGE_ITEMS)
              + tuple(k for k, *_ in RATE_ITEMS)
-             + ("stream_tps", "ss_decode_tps", "gen_win", "last_gen"))
+             + ("ss_decode_tps", "gen_win", "last_gen"))
 
 SERIES = [
     ("output_tps", "output tok/s (engine-wide)"),
@@ -302,8 +323,20 @@ def parse_engine(text):
         if not math.isfinite(number) or not name:
             continue
         sums[name] = sums.get(name, 0.0) + number
+        if "{" in head:
+            # ...and the LABEL-QUALIFIED key too, so a gauge that means ONE state of a
+            # multi-series metric (streams{state="decoding"}) can be read alone instead of
+            # being summed with its siblings. Spacing inside the braces is stripped on both
+            # sides so a lookup does not depend on how the exposition formats its labels.
+            lkey = _label_key(head)
+            sums[lkey] = sums.get(lkey, 0.0) + number
         seen += 1
     return sums, model, seen
+
+
+def _label_key(head: str) -> str:
+    """``name{a="b"}`` with every space removed, so a lookup is spacing-independent."""
+    return head.replace(" ", "")
 
 
 def note_single_stream(counters, now=None, family=None) -> None:
@@ -547,18 +580,6 @@ def _note(reachable: bool, no_metrics: bool, prom_ok: bool, model) -> str:
     return f"{head}. {tail}."
 
 
-def _ratio(item_a, item_b):
-    """a / b from two already-built items: None when either side is absent or b is zero.
-
-    Dividing by a zero `running` is not "0 tok/s per stream", it is "no stream to divide by" --
-    the same rule as every other number on this card.
-    """
-    a, b = item_a.get("value"), item_b.get("value")
-    if a is None or b is None or b == 0:
-        return None
-    return a / b
-
-
 def block(now=None, fetch=None, use_cache=True, window_s=1800, step_s=60):
     """Assemble the engine block. Never raises: a dead source degrades this card only."""
     fetch = fetch or http_get
@@ -634,16 +655,6 @@ def block(now=None, fetch=None, use_cache=True, window_s=1800, step_s=60):
         sources.append({"name": "prometheus", "url": PROM_URL, "ok": True,
                         "detail": f"{answered} instant queries, job {PROM_JOB}"})
 
-    # The per-stream decode rate: engine-wide output over requests running. It is the number the
-    # retired Grafana dashboard called "THE decoding capability metric", and it is what "tok/s"
-    # means to a reader asking how fast ONE client is being served -- the question behind "whatever
-    # L1 is doing". Derived from the two items above (their DISPLAYED values, so it cannot
-    # disagree with them by a rounding) rather than a third query of its own.
-    by_key = {it["key"]: it for it in items}
-    items.append(_item("stream_tps", "tok/s per stream", "tok/s",
-                       _ratio(by_key["output_tps"], by_key["running"]), "num2",
-                       "engine-wide output rate / requests running, read now -- throughput shared "
-                       "across the streams in flight, not what one stream gets"))
     # ...and what ONE stream gets, measured rather than divided. This is the number to read when
     # the question is "how fast is a single request being served", which is what the operator asks
     # for as "tok/s single stream". A dash means no interval in this process has yet finished

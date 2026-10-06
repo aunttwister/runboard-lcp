@@ -81,33 +81,37 @@
   <div class="card wide">
     <h2>Engine load — every request, eval or not <span class="badge" id="eng-src">…</span></h2>
     <div class="kpis">
-      <div class="kpi"><div class="v" id="k-eng-run">—</div><div class="l">concurrent streams in use</div></div>
-      <div class="kpi"><div class="v" id="k-eng-max">—</div><div class="l">concurrent streams max (--parallel)</div></div>
+      <div class="kpi"><div class="v" id="k-eng-run">—</div><div class="l">streams decoding (lanes generating tokens)</div></div>
+      <div class="kpi"><div class="v" id="k-eng-max">—</div><div class="l">streams max (--parallel)</div></div>
+      <div class="kpi"><div class="v" id="k-eng-flight">—</div><div class="l">requests in flight (prefill or decode)</div></div>
+      <div class="kpi"><div class="v" id="k-eng-fill">—</div><div class="l">streams pre-filling</div></div>
       <div class="kpi"><div class="v" id="k-eng-wait">—</div><div class="l">requests waiting</div></div>
       <div class="kpi"><div class="v" id="k-eng-req">—</div><div class="l">requests /min</div></div>
       <div class="kpi"><div class="v" id="k-eng-kv">—</div><div class="l">KV cache used %</div></div>
       <div class="kpi"><div class="v" id="k-eng-last">—</div><div class="l">last generation</div></div>
     </div>
-    <!-- TWO decode numbers, not three. Operator, 2026-10-06: "can we just have 19.11 tps decode
-         single stream, 80 tps decode aggregate. Simplify it." -- which supersedes the trio asked
-         for earlier the same day. The pair answers the two questions worth asking:
-           single    = generated tokens per second of DECODE TIME, summed over FINISHED requests
-                       (sum(rate(request_generation_tokens_sum)) / sum(rate(decode_seconds_sum))).
-                       This is the per-stream speed; it does not sag when lanes share.
-           aggregate = generated tokens per second of WALL CLOCK for the whole engine
-                       (sum(rate(generation_tokens_total))). What is coming out of the box now.
-         They are TWO INDEPENDENT MEASUREMENTS over two different counter families (per-request
-         completion sums vs the engine's own cumulative counters). Measured 2026-10-06 they sat at
-         ~18 and ~70-120 tok/s. Do NOT divide one by the other and read the lane count: that
-         quotient came out at 6.6 while 4 lanes were held and 5.9 while 8 were held, because the
-         numerator counts only finished requests while the aggregate covers the whole engine. Two
-         answers, not a ratio.
-         The third reading ("one stream, ALONE") and a live derived per-stream rate are kept in the
-         collapsed row: they are the two measurements this pair replaced and an eval sweep still
-         needs them, but they are not what you watch. -->
+    <!-- The throughput row. Operator, 2026-10-06: "can we just have 19.11 tps decode single
+         stream, 80 tps decode aggregate. Simplify it." -- then, the same hour, "we need prefill
+         speeds too". Three numbers, each a different quantity, none derivable from the others:
+           decode single stream = generated tokens per second of DECODE TIME (per lane-second).
+                                  Immune to idle time, so it does NOT sag when lanes share.
+           decode aggregate     = generated tokens per second of WALL CLOCK, whole engine. A time
+                                  average, so it sags toward zero whenever the box pauses -- which
+                                  is exactly why it can read BELOW the single-stream figure.
+           prefill              = prompt tokens the GPU actually COMPUTED per second of prefill.
+         The decode pair is NOT a ratio and must not be divided: measured 2026-10-06 the quotient
+         came out at 6.6 while four lanes were held and 21.9 against an average concurrency of 4.5,
+         which no duty cycle can be -- the two come from different counter families.
+         REMOVED the same day: "tok/s per stream" (output_tps / running). A two-minute time average
+         divided by an instantaneous snapshot gauge describes no single moment: it read 1.21 tok/s
+         against a true per-lane 13.5, and 48.4 against 16.1 an hour before. The engine's own help
+         text says requests_running is "Requests in prefill or decode" -- so it is NOT the number of
+         decoding lanes, and dividing by it produced a number with no meaning. `k-eng-run` now shows
+         streams{state="decoding"}, the lanes that are actually generating tokens. -->
     <div class="kpis grp">
       <div class="kpi"><div class="v" id="k-eng-dec">—</div><div class="l">decode tok/s — single stream</div></div>
       <div class="kpi"><div class="v" id="k-eng-out">—</div><div class="l">decode tok/s — aggregate (whole engine)</div></div>
+      <div class="kpi"><div class="v" id="k-eng-pre">—</div><div class="l">prefill tok/s — prompt tokens the GPU computed</div></div>
     </div>
     <div class="charts">
       <div>
@@ -127,9 +131,7 @@
       <summary>more engine counters — timings, cache, spec-decode</summary>
       <div class="kpis">
         <div class="kpi sm"><div class="v" id="k-eng-ss">—</div><div class="l">decode tok/s — one stream, alone (measured)</div></div>
-        <div class="kpi sm"><div class="v" id="k-eng-stream">—</div><div class="l">decode tok/s — one stream, while N share (live, derived)</div></div>
         <div class="kpi sm"><div class="v" id="k-eng-win">—</div><div class="l">tokens served (1 h)</div></div>
-        <div class="kpi sm"><div class="v" id="k-eng-pre">—</div><div class="l">prefill tok/s (finished reqs)</div></div>
         <div class="kpi sm"><div class="v" id="k-eng-ttft">—</div><div class="l">TTFT p50 s</div></div>
         <div class="kpi sm"><div class="v" id="k-eng-ttft95">—</div><div class="l">TTFT p95 s</div></div>
         <div class="kpi sm"><div class="v" id="k-eng-e2e">—</div><div class="l">end-to-end ms (finished reqs)</div></div>
@@ -308,11 +310,11 @@ function renderEngine(live) {
   };
   put("k-eng-out", "output_tps");
   put("k-eng-last", "last_gen"); put("k-eng-win", "gen_win");
-  put("k-eng-stream", "stream_tps")
   put("k-eng-ss", "ss_decode_tps");
   put("k-eng-pre", "prefill_tps"); put("k-eng-dec", "decode_tps");
   put("k-eng-ttft", "ttft_p50"); put("k-eng-ttft95", "ttft_p95");
-  put("k-eng-run", "running"); put("k-eng-max", "streams_max"); put("k-eng-wait", "waiting");
+  put("k-eng-run", "decoding"); put("k-eng-max", "streams_max"); put("k-eng-wait", "waiting");
+  put("k-eng-flight", "running"); put("k-eng-fill", "filling");
   put("k-eng-kv", "kv_pct"); put("k-eng-mtp", "mtp_accept"); put("k-eng-prefix", "prefix_hit");
   put("k-eng-req", "req_per_min"); put("k-eng-e2e", "e2e_ms");
 
