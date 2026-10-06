@@ -7,14 +7,25 @@
 <!--ZgX:chrome-head-->
 <style>
   /* Page-specific rules only. The frame -- design tokens, header, badges, view tabs and the
-     status strip -- is injected from ui_chrome.py so all three pages render one nav. */
-  /* Two columns, not auto-fit. auto-fit derives the column COUNT from the viewport, so the
-     pair of half-width cards (Throughput + Machine) occupied 2 of 3/4/5/7 tracks once the
-     window passed ~1318px and left the rest of the row empty -- measured 459px cards in a
-     3-track 1440px grid, 461px in a 4-track 1920px one. The 430px floor also stopped a track
-     shrinking below it (322px of page-level overflow on a 390px phone). repeat(2,minmax(0,1fr))
-     makes the pair fill the row at every width; the media query below makes one column the
-     whole layout on a narrow screen. */
+     status strip -- is injected from ui_chrome.py so all three pages render one nav.
+
+     THIS PAGE IS THE LIVE VIEW AND NOTHING ELSE. It answers two questions, both about now:
+     what is :18300 doing, and what are the two Sparks doing. Everything historical -- the
+     2026-09-24 load soak, its power/temperature trace, its phase table -- lives on /history
+     with its date and model attached (see static/history.html).
+
+     Measured 2026-10-06, before the split: this page fetched /api/state (67 KB) every 3 s --
+     ~22 KB/s to render a Throughput card reading 0.00 tok/s, a Machine card holding a retired
+     model's soak samples, and a Phases table. /api/history already carried the same soak, and
+     /api/live already carried the same machine values for BOTH boxes, live. Two cards, no
+     /api/state. */
+  /* Two columns, not auto-fit. auto-fit derives the column COUNT from the viewport, so a pair
+     of half-width cards occupied 2 of 3/4/5/7 tracks once the window passed ~1318px and left
+     the rest of the row empty -- measured 459px cards in a 3-track 1440px grid, 461px in a
+     4-track 1920px one. The 430px floor also stopped a track shrinking below it (322px of
+     page-level overflow on a 390px phone). repeat(2,minmax(0,1fr)) makes the pair fill the
+     row at every width; the media query below makes one column the whole layout on a narrow
+     screen. */
   main { padding:14px 18px 60px; display:grid; gap:14px;
          grid-template-columns:repeat(2,minmax(0,1fr)); }
   .card { background:var(--card); border:1px solid var(--line); border-radius:8px; padding:12px 14px;
@@ -24,7 +35,11 @@
   .kpis { display:flex; flex-wrap:wrap; gap:18px; }
   .kpi { min-width:0; }
   .kpi .v { font-size:22px; font-weight:600; }
+  /* One reading is actioned and the rest are read: the primary row gets the size, the
+     counters behind the disclosure get the small size, because a monitoring page that shouts
+     sixteen numbers equally has shouted nothing. */
   .kpi .l { font-size:11px; color:var(--dim); }
+  .kpi.sm .v { font-size:15px; font-weight:500; }
   canvas { display:block; width:100%; height:150px; }
   table { width:100%; border-collapse:collapse; font-size:12px; }
   th,td { text-align:left; padding:4px 6px; border-bottom:1px solid var(--line); white-space:nowrap; }
@@ -32,13 +47,18 @@
   .err { color:var(--d); white-space:pre-wrap; }
   .note { color:var(--dim); font-size:11px; margin-top:8px; }
   .wide { grid-column:1/-1; }
+  details.more { margin-top:12px; border-top:1px solid var(--line); padding-top:8px; }
+  details.more > summary { cursor:pointer; color:var(--dim); font-size:11px;
+                           text-transform:uppercase; letter-spacing:.06em; }
+  details.more > summary:hover { color:var(--fg); }
+  details.more .kpis { margin-top:10px; }
   /* Two axes side by side inside the engine card (see the note under it): the two scales differ
      by 100-1000x, and a shared axis would hide the generation trace. minmax(0,1fr) so a wide
      canvas cannot push the card wider than its track. */
-  .charts { display:grid; gap:14px; grid-template-columns:repeat(2,minmax(0,1fr)); }
+  .charts { display:grid; gap:14px; grid-template-columns:repeat(2,minmax(0,1fr)); margin-top:12px; }
   .charthead { font-size:11px; color:var(--dim); margin-bottom:4px; }
   /* One column below 900px: two cards do not fit a phone, and this keeps the rule identical
-     on every page (console.html carried it alone; the other two never collapsed). */
+     on every page. */
   @media (max-width:900px) { main { grid-template-columns:minmax(0,1fr); } }
   @media (max-width:900px) { .charts { grid-template-columns:minmax(0,1fr); } }
 </style>
@@ -46,31 +66,23 @@
 <body>
 <header>
 <!--ZgX:chrome-->
+  <!-- One badge, and it is the only claim this header makes. Everything else that used to sit
+       here (phase / soak state age / concurrency) was soak-archive state on a live page: the
+       soak finished 2026-09-24 and its file is SUPPOSED to be old, so those badges were either
+       permanently stale or permanently meaningless. The archive's age is stated on /history,
+       next to the archive. -->
   <span class="badge" id="hdr-port" title="what :18300 is serving right now, from the engine's own API — never a hardcoded claim">reading :18300…</span>
-  <span id="phase" class="badge">starting</span>
-  <span id="age" class="badge">—</span>
-  <span id="unit" class="badge">:18300</span>
 </header>
 <main>
   <div class="card wide">
     <h2>Engine load — every request, eval or not <span class="badge" id="eng-src">…</span></h2>
     <div class="kpis">
       <div class="kpi"><div class="v" id="k-eng-out">—</div><div class="l">output tok/s (whole engine)</div></div>
-      <div class="kpi"><div class="v" id="k-eng-last">—</div><div class="l">last generation</div></div>
-      <div class="kpi"><div class="v" id="k-eng-win">—</div><div class="l">tokens served (1 h)</div></div>
-      <div class="kpi"><div class="v" id="k-eng-stream">—</div><div class="l">tok/s per stream</div></div>
-      <div class="kpi"><div class="v" id="k-eng-ss">—</div><div class="l">single-stream decode tok/s</div></div>
-      <div class="kpi"><div class="v" id="k-eng-pre">—</div><div class="l">prefill tok/s (finished reqs)</div></div>
-      <div class="kpi"><div class="v" id="k-eng-dec">—</div><div class="l">decode tok/s (finished reqs)</div></div>
-      <div class="kpi"><div class="v" id="k-eng-ttft">—</div><div class="l">TTFT p50 s</div></div>
-      <div class="kpi"><div class="v" id="k-eng-ttft95">—</div><div class="l">TTFT p95 s</div></div>
       <div class="kpi"><div class="v" id="k-eng-run">—</div><div class="l">requests running</div></div>
       <div class="kpi"><div class="v" id="k-eng-wait">—</div><div class="l">requests waiting</div></div>
-      <div class="kpi"><div class="v" id="k-eng-kv">—</div><div class="l">KV cache used %</div></div>
-      <div class="kpi"><div class="v" id="k-eng-mtp">—</div><div class="l">MTP accepted %</div></div>
-      <div class="kpi"><div class="v" id="k-eng-prefix">—</div><div class="l">prefix cache hit %</div></div>
       <div class="kpi"><div class="v" id="k-eng-req">—</div><div class="l">requests /min</div></div>
-      <div class="kpi"><div class="v" id="k-eng-e2e">—</div><div class="l">end-to-end ms (finished reqs)</div></div>
+      <div class="kpi"><div class="v" id="k-eng-kv">—</div><div class="l">KV cache used %</div></div>
+      <div class="kpi"><div class="v" id="k-eng-last">—</div><div class="l">last generation</div></div>
     </div>
     <div class="charts">
       <div>
@@ -82,6 +94,25 @@
         <canvas id="c-eng-pre"></canvas>
       </div>
     </div>
+    <!-- The diagnostic counters. Kept, not deleted: an eval sweep or a throughput hunt needs
+         them, and deleting them would drop a number the module still publishes (the suite
+         pins that every published key is rendered). Collapsed, because at ~1.7 req/min most
+         of them answer nothing, and a page that shows everything highlights nothing. -->
+    <details class="more" id="eng-more">
+      <summary>more engine counters — timings, cache, spec-decode</summary>
+      <div class="kpis">
+        <div class="kpi sm"><div class="v" id="k-eng-win">—</div><div class="l">tokens served (1 h)</div></div>
+        <div class="kpi sm"><div class="v" id="k-eng-stream">—</div><div class="l">tok/s per stream</div></div>
+        <div class="kpi sm"><div class="v" id="k-eng-ss">—</div><div class="l">single-stream decode tok/s</div></div>
+        <div class="kpi sm"><div class="v" id="k-eng-pre">—</div><div class="l">prefill tok/s (finished reqs)</div></div>
+        <div class="kpi sm"><div class="v" id="k-eng-dec">—</div><div class="l">decode tok/s (finished reqs)</div></div>
+        <div class="kpi sm"><div class="v" id="k-eng-ttft">—</div><div class="l">TTFT p50 s</div></div>
+        <div class="kpi sm"><div class="v" id="k-eng-ttft95">—</div><div class="l">TTFT p95 s</div></div>
+        <div class="kpi sm"><div class="v" id="k-eng-e2e">—</div><div class="l">end-to-end ms (finished reqs)</div></div>
+        <div class="kpi sm"><div class="v" id="k-eng-prefix">—</div><div class="l">prefix cache hit %</div></div>
+        <div class="kpi sm"><div class="v" id="k-eng-mtp">—</div><div class="l">MTP accepted %</div></div>
+      </div>
+    </details>
     <div class="note" id="eng-note">reading the engine…</div>
     <div class="note">Two charts, not one: prefill runs 100–1000× the generation rate here (measured 1,382 tok/s
       against 20 tok/s on 2026-09-28), so on a shared axis the output line is a flat line along the floor. A gap is
@@ -99,66 +130,26 @@
       monitoring container — <code>monitor/</code> in this repo — serving the same exporter on :9400.
       The board reads the PAIR, not only the box it happens to run on: a one-box view reports half the
       machine as though it were the whole, and the unseen half is where a thermal event hides. Temp is
-      coloured at 82 °C (warn) and 85 °C (critical — the pair's published shutdown zone). A box that
+      coloured at 82 °C (warn) and 85 °C (critical — the pair's published shutdown zone); it is the
+      only coloured value on this page, because it is the only one anybody acts on. A box that
       does not answer shows a dash, never a zero, because 0 °C on an unreachable Spark reads exactly
       like a cold one.</div>
   </div>
 
-  <div class="card">
-    <h2>Throughput <span class="badge" id="tps-src">…</span></h2>
-    <div class="kpis">
-      <div class="kpi"><div class="v" id="k-agg">—</div><div class="l" id="l-agg">aggregate tok/s (60 s rolling)</div></div>
-      <div class="kpi"><div class="v" id="k-stream">—</div><div class="l" id="l-stream">per-stream mean tok/s (60 s rolling)</div></div>
-      <div class="kpi"><div class="v" id="k-conc">—</div><div class="l" id="l-conc">concurrency</div></div>
-      <div class="kpi"><div class="v" id="k-req">—</div><div class="l" id="l-req">requests (total)</div></div>
-      <div class="kpi"><div class="v" id="k-err">—</div><div class="l" id="l-err">errors (total)</div></div>
-    </div>
-    <canvas id="c-tps"></canvas>
-    <div class="note" id="tps-note">Blue: aggregate tok/s. Green: per-stream mean tok/s. One point per completed phase.</div>
-  </div>
-
-  <div class="card">
-    <h2>Machine — power and temperature</h2>
-    <div class="kpis">
-      <div class="kpi"><div class="v" id="k-pow">—</div><div class="l">power W (soak sample)</div></div>
-      <div class="kpi"><div class="v" id="k-temp">—</div><div class="l">temp °C (soak sample)</div></div>
-      <div class="kpi"><div class="v" id="k-util">—</div><div class="l">GPU util % (soak sample)</div></div>
-      <div class="kpi"><div class="v" id="k-mem">—</div><div class="l">MemAvailable GB (soak sample)</div></div>
-    </div>
-    <canvas id="c-pow"></canvas>
-    <div class="note">2 s cadence on the serve host. On GB10 utilisation is effectively binary, so power is the real load discriminator.</div>
-    <div class="note">Recorded by the <em>soak</em> run, not sampled now — these are the soak's last written samples.
-      Live per-box machine values are in the <strong>Boxes</strong> card above, one row per Spark.</div>
-  </div>
-
   <div class="card wide">
-    <h2>Phases</h2>
-    <table id="phases">
-      <thead><tr><th>phase</th><th>conc</th><th>min</th><th>reqs</th><th>errors</th>
-      <th>aggregate tok/s</th><th>per-stream mean</th><th>per-stream p50</th><th>scale x</th></tr></thead>
-      <tbody></tbody>
-    </table>
-    <div class="note" id="shapes"></div>
-  </div>
-
-  <div class="card wide">
-    <h2>Feed</h2>
-    <div id="feed" class="note">waiting for first state…</div>
+    <h2>The archive is not on this page</h2>
+    <div class="note">The 2026-09-24 load soak, its power/temperature trace and its phase table
+      describe a model this box no longer serves (EXL3 2.50bpw; :18300 serves GLM-5.3-Flash-EXL3
+      now). They are on <a href="/history">quant history</a> with their date and model attached to
+      them, where an archive belongs — rather than stacked against live readings here, where a
+      twelve-day-old number and a number from four seconds ago look the same until you read the
+      label. Nothing was deleted; it moved.</div>
   </div>
 </main>
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
-let lastGood = null, lastLive = null, staleMark = false;
-
-// Ages, at the resolution each source can support: a soak state file that no soak has touched
-// for days must not read as "347325 s".
-function agoShort(s) {
-  if (s < 90) return Math.round(s) + " s";
-  if (s < 5400) return Math.round(s / 60) + " m";
-  if (s < 172800) return (s / 3600).toFixed(1) + " h";
-  return (s / 86400).toFixed(1) + " d";
-}
+let lastLive = null;
 
 function fmt(v, d) { return (v === null || v === undefined || Number.isNaN(v)) ? "—" : Number(v).toFixed(d === undefined ? 2 : d); }
 
@@ -175,7 +166,8 @@ function boxCell(box, key, digits) {
   const v = Number(it.value);
   let s = digits === undefined ? String(it.value) : v.toFixed(digits);
   // Temp is the reason this card exists, so it carries the verdict: 82 °C warn, 85 °C critical
-  // (the pair's published shutdown zone). Other columns are plain numbers.
+  // (the pair's published shutdown zone). Other columns are plain numbers -- on purpose. Five
+  // coloured columns is five things to look at and therefore none.
   if (key === "gpu_temp") s = '<span class="' + (v >= 85 ? "bad" : v >= 82 ? "warn" : "ok") + '">' + s + "</span>";
   return s;
 }
@@ -265,69 +257,13 @@ function line(cv, series, colors, labels) {
   if (labels) { ctx.fillStyle = "#8b949e"; ctx.fillText(labels[0], pad.l, h - 5); }
 }
 
-// The throughput card answers ONE question -- how fast is this box producing tokens -- and it
-// asks whichever component owns the answer. When a job is running that is the job's own
-// rows.jsonl (see /api/live -> throughput, run_throughput.py). When nothing is running it is
-// the soak archive in /api/state. Before this split the card was wired only to the soak, so
-// during an eval run it showed aggregate 0.0, the SOAK's concurrency, and a chart of the five
-// soak phases -- the panel was not broken, it was answering about a different run.
-function renderThroughput(st, live) {
-  const t = (live && live.throughput) || null;
-  const src = $("tps-src");
-  const s = st.series || {};
-
-  if (t && t.active) {
-    src.textContent = "this run";
-    src.className = "badge live";
-    $("l-agg").textContent = "aggregate tok/s (this run, end-to-end)";
-    $("l-stream").textContent = "per-stream mean tok/s (this run)";
-    $("l-conc").textContent = "concurrency";
-    $("l-req").textContent = "rows done" + (t.rows_total ? " (of " + t.rows_total + ")" : "");
-    $("l-err").textContent = "rows errored";
-    $("k-agg").textContent = fmt(t.aggregate_tok_s);
-    $("k-stream").textContent = fmt(t.per_stream_tok_s);
-    $("k-conc").textContent = "1";
-    $("k-req").textContent = (t.rows_done === undefined || t.rows_done === null) ? "—" : String(t.rows_done);
-    $("k-err").textContent = (t.errors === undefined || t.errors === null) ? "—" : String(t.errors);
-    $("unit").textContent = t.preset ? (t.preset + " · 1") : "1";
-    const rs = t.series || {};
-    line($("c-tps"), [rs.agg_tps || [], rs.stream_tps || []], ["#58a6ff", "#3fb950"]);
-    $("tps-note").textContent =
-      "This run: " + (t.job_id || "—") + " · " + (t.tokens_total || 0) +
-      " completion tokens over " + (t.busy_s || 0) + " s of request time. " + (t.note || "") +
-      (t.reason ? " · " + t.reason : "");
-    return;
-  }
-
-  // Nothing is running: the soak archive. Labelled, never left to look live.
-  const cur = (st.phases || [])[st.phase_index] || {};
-  src.textContent = "soak archive";
-  src.className = "badge";
-  $("l-agg").textContent = "aggregate tok/s (60 s rolling)";
-  $("l-stream").textContent = "per-stream mean tok/s (60 s rolling)";
-  $("l-conc").textContent = "concurrency";
-  $("l-req").textContent = "requests (total)";
-  $("l-err").textContent = "errors (total)";
-  $("k-agg").textContent = fmt(st.live_agg_tps);
-  $("k-stream").textContent = fmt(st.live_stream_tps);
-  $("k-conc").textContent = cur.c ?? "—";
-  $("k-req").textContent = (st.totals || {}).requests ?? "—";
-  $("k-err").textContent = (st.totals || {}).errors ?? "—";
-  $("unit").textContent = "concurrency " + (cur.c ?? "—");
-  line($("c-tps"), [s.agg_tps || [], s.stream_tps || []], ["#58a6ff", "#3fb950"]);
-  $("tps-note").textContent =
-    "Soak archive, measured 2026-09-24: blue aggregate, green per-stream, one point per " +
-    "completed phase. None of it moves while an eval run is going — an eval run's own " +
-    "throughput appears here as soon as one is running. For what the engine is doing " +
-    "RIGHT NOW (no run required) see the engine-load card above." +
-    (t && t.reason ? " (" + t.reason + ")" : "");
-}
-
-// The engine card is the one panel that is ALWAYS live. It reads the ENGINE's own counters, so
-// it is populated whether or not an eval is running -- an agent's model calls, a manual probe, a
-// second client. Before it existed, nothing on this page could answer "what is the box doing
-// now" unless a run happened to be in flight: measured 2026-09-28, a live generation at 20 tok/s
-// with nothing queued rendered as the 2026-09-24 soak archive.
+// The engine card is the one panel that is ALWAYS live, and it is drawn from /api/live ALONE.
+// It reads the ENGINE's own counters, so it is populated whether or not an eval is running --
+// an agent's model calls, a manual probe, a second client. Before it existed, nothing on this
+// page could answer "what is the box doing now" unless a run happened to be in flight: measured
+// 2026-09-28, a live generation at 20 tok/s with nothing queued rendered as the 2026-09-24 soak
+// archive. It used to be drawn from /api/live while the REST of the page waited on /api/state;
+// /api/state is gone from this page now, so the guarantee is structural rather than ordered.
 function renderEngine(live) {
   const e = (live && live.engine) || null;
   const src = $("eng-src");
@@ -377,102 +313,18 @@ function renderEngine(live) {
   $("eng-note").textContent = (e.note || "") + " [" + health + " \u00b7 " + (e.recorded || "") + "]";
 }
 
-function render(st, live) {
-  const phases = st.phases || [];
-  const cur = phases[st.phase_index] || {};
-  const res = cur.result || {};
-  $("phase").textContent = st.phase === "DONE" ? "all phases complete" : ("phase " + (st.phase || "—") + " (" + (st.phase_index + 1) + " of " + phases.length + ")");
-  $("phase").className = "badge " + (st.phase === "DONE" ? "done" : "live");
-  // The throughput card is rendered by renderThroughput: it answers about the RUN IN
-  // PROGRESS when there is one and about the soak archive otherwise. Keeping one writer per
-  // element is why these KPIs are not set here.
-  renderThroughput(st, live);
-
-  const s = st.series || {};
-  const p = (a) => (a && a.length ? a[a.length - 1] : null);
-  $("k-pow").textContent = fmt(p(s.gpu_power), 1);
-  $("k-temp").textContent = fmt(p(s.gpu_temp), 1);
-  $("k-util").textContent = fmt(p(s.gpu_util), 0);
-  $("k-mem").textContent = fmt(p(s.mem_avail_gb), 1);
-
-  line($("c-pow"), [s.gpu_power || [], s.gpu_temp || []], ["#d29922", "#f85149"]);
-  // power and temperature share one axis above only for shape; values are real samples
-
-  const tb = $("phases").querySelector("tbody");
-  tb.innerHTML = "";
-  phases.forEach((ph, i) => {
-    const r = ph.result || {};
-    const tr = document.createElement("tr");
-    const cells = [ph.name, ph.c, ph.minutes,
-      r.requests ?? (ph.done ? "0" : "…"), r.errors ?? "…",
-      r.aggregate_tok_s ?? "…", r.per_stream_mean ?? "…", r.per_stream_p50 ?? "…", r.scaling_x ?? "…"];
-    cells.forEach((c, j) => {
-      const td = document.createElement("td");
-      td.textContent = String(c);
-      if (j === 0 && st.phase_index === i && st.phase !== "DONE") td.style.color = "#58a6ff";
-      tr.appendChild(td);
-    });
-    tb.appendChild(tr);
-  });
-
-  const sh = st.shapes || {};
-  $("shapes").textContent = "shapes: " + Object.keys(sh).map((k) => {
-    const v = sh[k];
-    const tps = v.elapsed > 0 ? (v.tokens / v.elapsed).toFixed(1) : "—";
-    return k + " n=" + v.n + " " + tps + " tok/s";
-  }).join("  ·  ");
-
-  const tok = (st.totals || {}).completion_tokens || 0;
-  const el = (st.totals || {}).elapsed || 0;
-  $("feed").textContent =
-    "started " + (st.started_utc || "—") + " · " + (st.totals || {}).requests +
-    " requests · " + tok + " completion tokens · aggregate " +
-    (el > 0 ? (tok / el).toFixed(2) : "—") + " tok/s over the whole run";
-}
-
 async function poll() {
   try {
-    // Two documents, deliberately: /api/state is the soak archive, /api/live is the live
-    // machine + the run in progress. The throughput card needs both to say which question it
-    // is answering. A failure of either must not blank the other.
-    const [rs, rl] = await Promise.allSettled([
-      fetch("/api/state", { cache: "no-store" }),
-      fetch("/api/live?window=30m", { cache: "no-store" }),
-    ]);
-    // The engine card is rendered straight from /api/live, BEFORE the soak archive is required
-    // to parse: it must still appear when /api/state is missing or broken (no soak state yet).
-    if (rl.status === "fulfilled" && rl.value.ok) {
-      try { lastLive = await rl.value.json(); } catch (e) { /* keep the previous live doc */ }
-      renderEngine(lastLive);
-      renderBoxes(lastLive);
-    }
-    if (rs.status !== "fulfilled" || !rs.value.ok) {
-      throw new Error("state HTTP " + (rs.status === "fulfilled" ? rs.value.status : "?"));
-    }
-    const st = await rs.value.json();
-    lastGood = st;
-    const age = st.now_age_s;
-    const b = $("age");
-    // This counts seconds since the LOAD-SOAK harness last wrote its state file
-    // (/root/load/run/state.json) -- not the engine's age, not this page's data age, not L1's.
-    // With no soak in flight that file is SUPPOSED to be days old, so yellowing it on age alone
-    // was a permanent false alarm: measured 2026-09-28 it read 347,325 s (4.0 d) yellow while the
-    // engine card beside it was live. It is yellow only while a soak IS running and its state has
-    // stopped advancing -- the one failure it can actually detect.
-    const soakRunning = !!(st.phase && st.phase !== "DONE");
-    b.textContent = "soak state " + (age === null || age === undefined ? "—" : agoShort(age)) +
-      (soakRunning ? "" : " (idle)");
-    staleMark = soakRunning && age !== null && age !== undefined && age > 30;
-    b.className = "badge " + (staleMark ? "stale" : (soakRunning ? "live" : ""));
-    b.title = "seconds since the load-soak harness last wrote its state file" +
-      " — not the engine's age" + (soakRunning ? "" : "; no soak is running, so an old" +
-      " stamp here is expected");
-    render(st, lastLive);
+    const r = await fetch("/api/live?window=30m", { cache: "no-store" });
+    if (!r.ok) throw new Error("live HTTP " + r.status);
+    lastLive = await r.json();
+    renderEngine(lastLive);
+    renderBoxes(lastLive);
   } catch (e) {
-    $("feed").innerHTML = '<span class="err">feed error: ' + String(e) + "</span>" +
-      (lastGood ? " (showing last good state)" : "");
-    if (lastLive) { renderEngine(lastLive); renderBoxes(lastLive); }
-    if (lastGood) render(lastGood, lastLive);
+    // One document, one failure path: there is no second source whose absence could leave
+    // this page half-drawn, and no "last good state" to fall back to that would be honest.
+    $("eng-note").innerHTML = '<span class="err">live document unavailable: ' + esc(e) +
+      "</span>" + (lastLive ? " (the cards below still show the last reading that arrived)" : "");
   }
 }
 try { poll(); setInterval(poll, 3000); }

@@ -421,20 +421,25 @@ def test_prefill_is_charted_on_its_own_axis():
 
 
 def test_the_engine_card_is_rendered_from_the_live_document_alone():
-    """It is drawn BEFORE /api/state is required to parse.
+    """It is drawn from /api/live, and the page has no other document that could hide it.
 
-    Pinned as the exact call site rather than as "the string appears somewhere before ...":
-    the weaker form stays green with the call wrapped in `if (false)`, which is precisely the
-    defect -- a card that exists, is drawn nowhere, and renders as permanent dashes. A missing
-    soak archive must not be able to hide the only always-on panel on the page.
+    Pinned as the exact call site rather than as "the string appears somewhere": the weaker form
+    stays green with the call wrapped in `if (false)`, which is precisely the defect -- a card
+    that exists, is drawn nowhere, and renders as permanent dashes.
+
+    This used to be an ORDERING property: the card was drawn from /api/live *before* /api/state
+    was required to parse, so a missing soak archive could not hide the only always-on panel.
+    As of 2026-10-06 the page does not fetch /api/state at all -- the soak archive moved to
+    /history, where it belongs, and took its 67 KB-every-3-s fetch with it -- so the guarantee is
+    now structural: ONE document, ONE failure path, and no second fetch whose failure could leave
+    the card undrawn. A missing live document is a labelled error on the note line, not a blank.
     """
     body = " ".join(PAGE.split("async function poll()")[1].split())
-    wiring = ("if (rl.status === \"fulfilled\" && rl.value.ok) { "
-              "try { lastLive = await rl.value.json(); } "
-              "catch (e) { /* keep the previous live doc */ } "
-              "renderEngine(lastLive); renderBoxes(lastLive); }")
-    assert wiring in body, "the engine card is not drawn unconditionally from /api/live"
-    assert body.index(wiring) < body.index('throw new Error("state HTTP')
+    assert 'fetch("/api/state"' not in PAGE, \
+        "a second document is back on the live page; the engine card's guarantee is ordering again"
+    assert body.count("fetch(") == 1, "the page fetches more than the live document"
+    assert "renderEngine(lastLive); renderBoxes(lastLive);" in body, \
+        "the engine card is not drawn unconditionally from /api/live"
 
 
 # ------------------------------------------------------------------ transport

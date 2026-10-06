@@ -8,10 +8,19 @@ Three views and one JSON surface, all served by a single stdlib HTTP server on p
 
 | path | what it is |
 |---|---|
-| `/` | now — engine load (every request, run or not, incl. last-generation recency and a measured single-stream decode rate), per-shape throughput, soak summary |
-| `/history` | every banked run, ranked inside its own kit |
+| `/` | now, and only now — engine load (every request, run or not, incl. last-generation recency and a measured single-stream decode rate) and per-Spark telemetry. Fetches `/api/live` and nothing else. |
+| `/history` | every banked run, ranked inside its own kit — plus the load-soak archive with its date, its model and its thermal envelope |
 | `/console` | switch engine, queue an eval, search HuggingFace and download a pack |
 | `/api/state` `/api/history` `/api/models` `/api/dispatch` `/api/live` | the JSON behind those pages |
+
+**The split is a rule, not a layout choice.** `/` is the live page and carries no archived number;
+`/history` is the archive page and carries no live one. Every archive number states the date and
+the model that produced it, at the point of display. This is not cosmetic: `/` used to fetch
+`/api/state` (the soak archive, 67 KB) every 3 s and render it as a Throughput card reading
+`0.00 tok/s` beside an engine that was serving — a retired model's zero, four seconds' walk from a
+live reading, reads as *the box is idle*. Measured cost of that: 27 KB/s per open tab, 1.95 GB/day.
+The archive is still complete; it is on the page that says what it is (`tests/test_page_badges.py`
+pins both halves of this).
 
 The serving engine itself is a separate concern: exllamav3 on `:18300` behind
 `/root/serve.sh` (`cruz` \| `exl3` \| `vllm` \| `status`). This repo reads and drives that
@@ -34,7 +43,8 @@ engine_metrics.py     what the SERVING ENGINE is doing right now: prefill/decode
                       running/waiting -- read off :18300 and Prometheus (job zgx-vllm), so the
                       page answers "what is the box doing" with no eval running.
 corrected_metrics.py  the one definition of aggregate throughput (tokens / wall clock).
-load_soak.py          the load-soak harness that produced the numbers on `/`.
+load_soak.py          the load-soak harness that produced the archive on `/history`. Source-of-
+                      record only; not deployed (a soak is an operator action, not a request).
 static/               the three pages (deployed flat into /root/load).
 systemd/              the units, as installed on the box.
 monitor/              one monitoring container per Spark (see monitor/README.md). Each GB10
@@ -76,6 +86,16 @@ These are not style preferences; each one is the fix for something that actually
 8. **Do not guess a key name.** The dispatcher's first summary reader guessed `auto_graded`
    and reported all-null against an artifact that was fine; the HF search date field is
    `createdAt`, not `lastModified`. Read the names the source actually uses.
+9. **A page shows one time horizon.** `/` is live and `/history` is archive; neither carries the
+   other's numbers. The rule follows from rule 6 rather than from taste: an archived `0.00 tok/s`
+   on the live page is the same lie as a zero for an unreachable box, because the reader has no
+   way to know it is a different model on a different day. Where an archived number is shown at
+   all it carries its date and its model *in the value's own label* -- `aggregate tok/s (60 s
+   rolling, 2026-09-24 13:05)` -- so its age is structural and cannot be forgotten. The board
+   kept a 12-day-old soak on `/` until 2026-10-06 and it read as a current reading.
+10. **One actionable signal per page.** On `/` only temperature is coloured, at 82/85 °C. A page
+   where four things compete for attention is a page where none of them holds it, and the one
+   that someone would actually act on is the one that gets lost.
 
 ## Running it
 

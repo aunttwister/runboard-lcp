@@ -51,6 +51,19 @@
          color:var(--dim); cursor:pointer; font:12px ui-monospace,Menlo,monospace; }
   .tab:hover { color:var(--fg); }
   .tab.active { color:var(--fg); border-color:var(--a); background:#1c2128; }
+  /* The archive stamp and its KPI row. The stamp is the point: this page holds the ONE set of
+     numbers on the board that describe a model nothing serves any more, so the date and the
+     model are stated above them rather than left in a footnote somebody has to find. */
+  .arch { border-left:2px solid var(--c); padding:5px 0 5px 9px; margin-bottom:12px;
+          font-size:11.5px; color:var(--fg); }
+  .arch b { color:var(--c); }
+  .arch .dim { color:var(--dim); }
+  .kpis { display:flex; flex-wrap:wrap; gap:18px; margin-bottom:12px; }
+  .kpi { min-width:0; }
+  .kpi .v { font-size:22px; font-weight:600; font-variant-numeric:tabular-nums; }
+  .kpi .l { font-size:11px; color:var(--dim); }
+  #mach { margin-bottom:14px; }
+  #mach td, #mach th { font-variant-numeric:tabular-nums; }
 </style>
 </head>
 <body>
@@ -134,6 +147,24 @@
 
   <div class="card wide" id="soak-card">
     <h2 id="soak-h2">Load soak — final phase record</h2>
+    <!-- This is an ARCHIVE and has to read as one. The soak ran on 2026-09-24 against a model
+         :18300 no longer serves, so every number below carries the date and the model that
+         produced it -- in the heading, in the KPI labels, and in the note. Before 2026-10-06
+         these same numbers sat on the live page (/) beside a four-second-old engine reading,
+         with a "0.00 tok/s" that looked like the box was idle while it was serving. -->
+    <div class="arch" id="arch-stamp"></div>
+    <div class="kpis">
+      <div class="kpi"><div class="v" id="k-agg">—</div><div class="l" id="l-agg">aggregate tok/s (60 s rolling)</div></div>
+      <div class="kpi"><div class="v" id="k-stream">—</div><div class="l" id="l-stream">per-stream mean tok/s (60 s rolling)</div></div>
+      <div class="kpi"><div class="v" id="k-conc">—</div><div class="l" id="l-conc">concurrency</div></div>
+      <div class="kpi"><div class="v" id="k-req">—</div><div class="l" id="l-req">requests (total)</div></div>
+      <div class="kpi"><div class="v" id="k-err">—</div><div class="l" id="l-err">errors (total)</div></div>
+    </div>
+    <table id="mach">
+      <thead><tr><th>machine sample</th><th class="num">min</th><th class="num">mean</th>
+        <th class="num">max</th><th>over</th></tr></thead>
+      <tbody></tbody>
+    </table>
     <table id="soak">
       <thead><tr>
         <th>phase</th><th class="num">streams</th><th class="num">min</th>
@@ -178,7 +209,7 @@
 <script>
 "use strict";
 const $ = (id) => document.getElementById(id);
-const state = { doc: null, model: "all", kit: null };
+const state = { doc: null, model: "all", kit: null, soak: null };
 
 function fmt(v, d) {
   if (v === null || v === undefined || Number.isNaN(v)) return "—";
@@ -217,9 +248,72 @@ function runsView() {
   return state.model === "all" ? all : all.filter(r => r.model === state.model);
 }
 
+// Machine statistics over the soak's own sample series. An archive wants the ENVELOPE, not a
+// squiggly line: "how hot did the pair actually get under load" is a min/mean/max question, and
+// it is the one measurement on this board that speaks to the thermal envelope rather than to a
+// single instant. Samples are 2 s apart; the span is stated so a reader can size the claim.
+function stats(a) {
+  const v = (a || []).filter(x => x !== null && x !== undefined && !Number.isNaN(x));
+  if (!v.length) return null;
+  const sum = v.reduce((s, x) => s + x, 0);
+  return { n: v.length, min: Math.min.apply(null, v), max: Math.max.apply(null, v), mean: sum / v.length };
+}
+
+function renderArchive() {
+  const st = state.soak || {};
+  const sk = (state.doc && state.doc.soak) || {};
+  const stamp = $("arch-stamp");
+  const series = st.series || {};
+  const span = stats(series.ts);
+  const over = span ? (span.n + " samples, " + (span.max - span.min > 90
+      ? Math.round((span.max - span.min) / 60) + " min" : Math.round(span.max - span.min) + " s")) : "—";
+
+  // The stamp names the date and the model, which is the whole point of this card: the board's
+  // only set of numbers for a model nothing serves. The model text comes from the history index
+  // (server-side), so this page cannot invent a model name; the date falls back to the state
+  // file's own start time when the index has not been rebuilt yet. `model_id` is preferred over
+  // the index's long `model` string because that string already ends in "— the model serving
+  // during the 2026-09-24 soak", and this stamp says the same thing in its own words.
+  const mid = sk.model_id || sk.model || "an unnamed model";
+  const unit = sk.unit ? " (" + sk.unit + ")" : "";
+  const started = String(sk.started_utc || st.started_utc || "—").slice(0, 16).replace("T", " ");
+  if (stamp) {
+    stamp.innerHTML = "<b>ARCHIVE</b> — the " + esc(started) + " UTC soak, served by <b>" +
+      esc(mid) + esc(unit) + "</b>, which :18300 no longer serves. " +
+      '<span class="dim">These numbers do not move. For what the engine is doing now see ' +
+      '<a href="/">load telemetry</a>.</span>';
+  }
+
+  const phases = st.phases || [];
+  const cur = phases[st.phase_index] || {};
+  $("k-agg").textContent = fmt(st.live_agg_tps);
+  $("k-stream").textContent = fmt(st.live_stream_tps);
+  $("k-conc").textContent = (cur.c === null || cur.c === undefined) ? "—" : String(cur.c);
+  $("k-req").textContent = ((st.totals || {}).requests === undefined) ? "—" : String(st.totals.requests);
+  $("k-err").textContent = ((st.totals || {}).errors === undefined) ? "—" : String(st.totals.errors);
+  $("l-agg").textContent = "aggregate tok/s (60 s rolling, " + started + ")";
+  $("l-stream").textContent = "per-stream mean tok/s (60 s rolling, " + started + ")";
+
+  const rows = [
+    ["GPU temp °C", "gpu_temp", 1], ["GPU power W", "gpu_power", 1],
+    ["GPU util %", "gpu_util", 0], ["MemAvailable GB", "mem_avail_gb", 1],
+  ].map(function (spec) {
+    const s = stats(series[spec[1]]);
+    if (!s) return "<tr><td>" + spec[0] + '</td><td class="num dim" colspan="4">no samples</td></tr>';
+    return "<tr><td>" + spec[0] + "</td>" +
+      ntd(s.min, spec[2]) + ntd(s.mean, spec[2]) + ntd(s.max, spec[2]) +
+      '<td class="dim">' + esc(over) + "</td></tr>";
+  }).join("");
+  $("mach").querySelector("tbody").innerHTML = rows;
+}
+
 function renderAll() {
   const d = state.doc;
   if (!d) return;
+  // The archive is rendered from its own document and reads nothing from the run index, so it
+  // is drawn first: a failure in the run tables must not be able to blank the one card that
+  // carries the board's only thermal-under-load measurement.
+  renderArchive();
   const runs = runsView();
   const visible = new Set(runs.map(r => r.run_id));
   const runById = {};
@@ -351,9 +445,16 @@ function renderAll() {
   $("load-card").style.display = showLoad ? "" : "none";
   $("soak-card").style.display = showLoad ? "" : "none";
   if (sk0.model) {
+    const started = String(sk0.started_utc || "—").slice(0, 16).replace("T", " ");
     $("load-h2").textContent = "Per eval type under load — " + sk0.model +
       ", by prompt shape and concurrency";
-    $("soak-h2").textContent = "Load soak — final phase record, " + sk0.model;
+    // The date belongs IN the heading, not in a note under the table. Every number in this card
+    // is from one retired model on one day, and a heading that omits that is a heading that
+    // invites the reader to compare it with today's live page. The exact quant goes in the stamp
+    // below and in the note under the table; the heading names the model family, so it does not
+    // repeat the index's long descriptive string back at the reader.
+    $("soak-h2").textContent = "Load soak — the " + started + " archive, " +
+      (sk0.model_id || sk0.model || "");
   }
 
   // ---- soak
@@ -427,6 +528,14 @@ async function load() {
   }
   const first = !state.doc;
   state.doc = d;
+  // The soak's raw state (its 900-point sample series) is a different document from the
+  // history index. It is fetched HERE, on the archive page, at a 60 s cadence -- the live page
+  // used to fetch this same file every 3 s (67 KB, ~22 KB/s) to render four numbers that do not
+  // move, which is how a twelve-day-old reading came to sit beside a live one.
+  try {
+    const rs = await fetch("/api/state", { cache: "no-store" });
+    state.soak = rs.ok ? await rs.json() : null;
+  } catch (e) { state.soak = null; }
   if (first) {
     const sel = $("model-select");
     const models = d.models || [];
