@@ -115,6 +115,103 @@ def test_parse_engine_of_nothing_is_empty(text):
     assert EM.parse_engine(text) == ({}, None, 0)
 
 
+# --------------------------------------------- the engine's inventory, and the concurrency pair
+#
+# Captured verbatim from .107:18300/metrics (2026-10-06), one line per distinct metric name, values
+# and labels exactly as the engine printed them. Two things rest on this fixture:
+#
+#   * the lane cap the engine was started with (`tensorfold_health:streams_max`), which nothing in
+#     the vLLM family publishes, so it is a permanent dash there rather than an invented 0;
+#   * the INVENTORY the card is checked against -- see the last test in this section, which walks
+#     every expression the card sends and demands each metric name in it appear here. That check
+#     was missing when `decode_tps` asked Prometheus for a vLLM counter this engine has never
+#     published: nothing raised, the selector matched nothing, and the KPI was a permanent dash
+#     reading as "no decode happened".
+TENSORFOLD_TEXT = b"""tensorfold:requests_running 2
+tensorfold:requests_waiting 0
+tensorfold:prompt_tokens_total 28627521
+tensorfold:generation_tokens_total 4090409
+tensorfold:kv_cache_usage_ratio{pool="0"} 0.01568
+tensorfold:mtp_drafted_total 5096586
+tensorfold:mtp_accepted_total 2982477
+tensorfold:request_latency_seconds_bucket{le="0.01"} 0
+tensorfold:request_latency_seconds_sum 280891.470421
+tensorfold:request_latency_seconds_count 1132
+tensorfold:time_to_first_token_seconds_bucket{le="0.01"} 0
+tensorfold:time_to_first_token_seconds_sum 73877.8839
+tensorfold:time_to_first_token_seconds_count 1017
+tensorfold_health:requests_total 1132
+tensorfold_health:completion_tokens_total 4098509
+tensorfold_health:cached_tokens_total 21621888
+tensorfold_health:rounds_total 956209
+tensorfold_health:prefill_seconds_total 4712.6847
+tensorfold_health:decode_seconds_total 170711.6853
+tensorfold_health:streams{state="decoding"} 2
+tensorfold_health:context_length 1048576
+tensorfold_health:streams_max 8
+tensorfold_health:pool_tokens 1609728
+tensorfold_health:pool_free_tokens 1521664
+tensorfold_health:kept_prompts 32
+"""
+
+# A metric name as it appears inside a PromQL expression: a family-prefixed name, never a function.
+NAME_RE = re.compile(r"(?:tensorfold|vllm)[a-z_]*:[a-zA-Z_:]+")
+
+
+def test_the_lane_cap_is_read_off_the_engine_rather_than_remembered():
+    """The pair is the reading: 7 in use is fine against 8 lanes and an overload against 7.
+
+    A throughput figure without its cap beside it cannot be interpreted, which is why the two
+    numbers ship together -- and why the cap is read from the engine that is actually running
+    rather than from the `--parallel` somebody believes it was started with.
+    """
+    b = EM.block(now=1_000, fetch=route(engine=TENSORFOLD_TEXT), use_cache=False)
+    items = {i["key"]: i for i in b["items"]}
+    assert set(items) == set(EM.ITEM_KEYS), "the published key set is the contract"
+    assert items["running"]["value"] == 2
+    assert items["streams_max"]["value"] == 8
+
+
+def test_every_name_the_card_queries_is_a_name_this_engine_publishes():
+    """The widening of the fixture above: the card may only ask for names the engine owns.
+
+    Both sides are walked -- the rate expressions and the gauges -- because the two lookup paths
+    differ (`expr_for` rewrites text; the gauges go through `_m`), and a miss on either one is
+    silent. A metric name that raises nothing and matches nothing is the worst failure on this
+    card: it renders as a dash, which is exactly what "nothing is happening" renders as.
+    """
+    published = set(EM.parse_engine(TENSORFOLD_TEXT.decode())[0])
+    assert len(published) == 25, "the fixture is no longer the engine's full inventory"
+
+    asked: dict[str, str] = {}
+    for key, _label, _unit, _fmt, _basis in EM.RATE_ITEMS:
+        for name in NAME_RE.findall(EM.expr_for(key, "tensorfold")):
+            asked.setdefault(name, f"rate:{key}")
+    for key, _label, _unit, metric, _fmt in EM.GAUGE_ITEMS:
+        asked.setdefault(EM._m(metric, "tensorfold"), f"gauge:{key}")
+
+    assert asked, "nothing was extracted; the name regex is wrong"
+    missing = {name: where for name, where in asked.items() if name not in published}
+    assert missing == {}, f"the card queries names this engine never publishes: {missing}"
+
+
+def test_a_lane_cap_the_engine_does_not_publish_is_a_dash_and_never_a_zero():
+    """vLLM publishes no lane cap, so the canonical name has no alias and the lookup must MISS.
+
+    An invented 0 would read as "this engine allows no concurrency" -- a claim about the engine
+    made out of nothing. The other direction matters too: the sibling gauge must still resolve, so
+    this cannot pass by the whole block going dark.
+    """
+    # ENGINE_TEXT is a vLLM exposition with no lane cap in it; its `num_requests_running` is 1.0.
+    # The gauge comes from the engine's own text, NOT from the Prometheus stub -- so the value to
+    # assert here is the one the engine published.
+    b = EM.block(now=1_000, fetch=route(values={"vllm:num_requests_running": "2"}),
+                 use_cache=False)
+    items = {i["key"]: i for i in b["items"]}
+    assert items["running"]["value"] == 1, "the sibling gauge must still resolve"
+    assert items["streams_max"]["value"] is None
+
+
 # ------------------------------------------------------------------ one instant value
 
 def test_instant_returns_the_value_of_the_first_series():
@@ -371,6 +468,21 @@ def test_the_card_renders_every_number_the_module_publishes():
     pairs = PUT_RE.findall(PAGE)
     assert pairs, "the engine card has no KPI wiring at all"
     assert {key for _id, key in pairs} == set(EM.ITEM_KEYS)
+
+
+def test_the_numbers_the_operator_asked_to_watch_are_not_behind_the_disclosure():
+    """Requested 2026-10-06: "decode single stream, decode concurrent and number of concurrent
+    params".
+
+    The collapsed row is a promise that what sits inside it is diagnostic rather than watched, so a
+    number somebody asked to watch has to be readable without opening anything. This is the guard
+    that stops a promoted KPI sliding back behind the disclosure: the ids are asserted on the
+    markup BEFORE it, not merely somewhere on the page.
+    """
+    primary = PAGE.split('id="eng-more"')[0]
+    assert primary, "the disclosure marker moved; this guard would now assert nothing"
+    for ident in ("k-eng-run", "k-eng-max", "k-eng-ss", "k-eng-stream", "k-eng-dec"):
+        assert f'id="{ident}"' in primary, f"#{ident} is behind the disclosure, not on the card"
 
 
 def test_every_engine_card_id_exists_in_the_markup():

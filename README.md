@@ -8,7 +8,7 @@ Three views and one JSON surface, all served by a single stdlib HTTP server on p
 
 | path | what it is |
 |---|---|
-| `/` | now, and only now — engine load (every request, run or not, incl. last-generation recency and a measured single-stream decode rate) and per-Spark telemetry. Fetches `/api/live` and nothing else. |
+| `/` | now, and only now — engine load (every request, run or not: output/prefill/decode throughput, the decode trio, lanes in use against the engine's own cap, last-generation recency) and per-Spark telemetry. Fetches `/api/live` and nothing else. |
 | `/history` | every banked run, ranked inside its own kit — plus the load-soak archive with its date, its model and its thermal envelope |
 | `/console` | switch engine, queue an eval, search HuggingFace and download a pack |
 | `/api/state` `/api/history` `/api/models` `/api/dispatch` `/api/live` | the JSON behind those pages |
@@ -38,10 +38,14 @@ live_server.py        the read-only HTTP server (:18400). Pages + JSON. Executes
 dispatcher.py         the executor. Runs as load-dispatch.service on a 15s timer.
 history_collector.py  folds run artifacts into run/history.json for /history.
 zgx_exporter.py       Prometheus exporter (:9400) for the Grafana dashboard.
-engine_metrics.py     what the SERVING ENGINE is doing right now: prefill/decode/output tok/s,
-                      TTFT, KV occupancy, prefix-cache hit rate, MTP acceptance, requests
-                      running/waiting -- read off :18300 and Prometheus (job zgx-vllm), so the
-                      page answers "what is the box doing" with no eval running.
+engine_metrics.py     what the SERVING ENGINE is doing right now: prefill/decode/output tok/s, the
+                      decode trio (one stream alone / one stream while N share, live and
+                      measured), TTFT, KV occupancy, prefix-cache hit rate, MTP acceptance, lanes
+                      in use against the engine's own `--parallel` cap -- read off :18300 and
+                      Prometheus (job zgx-vllm), so the page answers "what is the box doing" with
+                      no eval running. Metric names are aliased per engine family
+                      (FAMILY_ALIASES / FAMILY_EXPR); a name with no alias dashes silently, which
+                      is why every expression is checked against the engine's captured inventory.
 corrected_metrics.py  the one definition of aggregate throughput (tokens / wall clock).
 load_soak.py          the load-soak harness that produced the archive on `/history`. Source-of-
                       record only; not deployed (a soak is an operator action, not a request).
@@ -96,6 +100,19 @@ These are not style preferences; each one is the fix for something that actually
 10. **One actionable signal per page.** On `/` only temperature is coloured, at 82/85 °C. A page
    where four things compete for attention is a page where none of them holds it, and the one
    that someone would actually act on is the one that gets lost.
+11. **A per-stream rate is meaningless without the regime it was measured in.** "decode tok/s" can
+   mean *one stream with the box to itself* or *one stream while seven others share it*, and those
+   differ by an order of magnitude -- printing either without saying which is a claim the number
+   cannot support. So the card carries the trio (alone / while N share, live / while N share,
+   measured) **and** the lane pair (`in use` against the engine's own cap) that says which regime
+   is current; the number to read is the ratio, and 1.0 means concurrency bought nothing. This also
+   fixes what a dash means there: `ss_decode_tps` is a dash whenever the box had company, because a
+   single-stream speed measured while other streams were running is not a single-stream speed.
+   Corollary, learned on 2026-10-06: a metric name missing from `FAMILY_ALIASES` raises nothing --
+   the expression simply matches nothing and the KPI dashes forever, which on this card reads as
+   "no decode happened" (`decode_tps` did exactly that against the TensorFold engine).
+   `test_every_name_the_card_queries_is_a_name_this_engine_publishes` is the guard: every name in
+   every expression must appear in the engine's own captured inventory.
 
 ## Running it
 

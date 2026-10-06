@@ -52,6 +52,10 @@
                            text-transform:uppercase; letter-spacing:.06em; }
   details.more > summary:hover { color:var(--fg); }
   details.more .kpis { margin-top:10px; }
+  /* A second KPI row inside one card -- the engine card's decode trio. In one flex row the trio
+     wraps into the middle of the engine counters and reads as three more of the same; the air is
+     what says "these three belong to each other". */
+  .kpis + .kpis { margin-top:12px; }
   /* Two axes side by side inside the engine card (see the note under it): the two scales differ
      by 100-1000x, and a shared axis would hide the generation trace. minmax(0,1fr) so a wide
      canvas cannot push the card wider than its track. */
@@ -78,11 +82,23 @@
     <h2>Engine load — every request, eval or not <span class="badge" id="eng-src">…</span></h2>
     <div class="kpis">
       <div class="kpi"><div class="v" id="k-eng-out">—</div><div class="l">output tok/s (whole engine)</div></div>
-      <div class="kpi"><div class="v" id="k-eng-run">—</div><div class="l">requests running</div></div>
+      <div class="kpi"><div class="v" id="k-eng-run">—</div><div class="l">concurrent streams in use</div></div>
+      <div class="kpi"><div class="v" id="k-eng-max">—</div><div class="l">concurrent streams max (--parallel)</div></div>
       <div class="kpi"><div class="v" id="k-eng-wait">—</div><div class="l">requests waiting</div></div>
       <div class="kpi"><div class="v" id="k-eng-req">—</div><div class="l">requests /min</div></div>
       <div class="kpi"><div class="v" id="k-eng-kv">—</div><div class="l">KV cache used %</div></div>
       <div class="kpi"><div class="v" id="k-eng-last">—</div><div class="l">last generation</div></div>
+    </div>
+    <!-- The decode trio. One "decode tok/s" is not a speed, it is a speed under an UNNAMED amount
+         of sharing: 7 streams splitting a fixed budget and 1 stream with the engine to itself can
+         print the same number and mean opposite things. So all three readings sit together --
+         alone, while sharing, and all streams combined -- and the number to read is the RATIO of
+         the first two (1.0 = concurrency bought nothing, >1 = it did). Streams in use over streams
+         max above is what tells you which regime you are looking at. -->
+    <div class="kpis grp">
+      <div class="kpi"><div class="v" id="k-eng-ss">—</div><div class="l">decode tok/s — one stream, alone</div></div>
+      <div class="kpi"><div class="v" id="k-eng-stream">—</div><div class="l">decode tok/s — one stream, while N share (live)</div></div>
+      <div class="kpi"><div class="v" id="k-eng-dec">—</div><div class="l">decode tok/s — one stream, while N share (measured, 2 m)</div></div>
     </div>
     <div class="charts">
       <div>
@@ -102,10 +118,7 @@
       <summary>more engine counters — timings, cache, spec-decode</summary>
       <div class="kpis">
         <div class="kpi sm"><div class="v" id="k-eng-win">—</div><div class="l">tokens served (1 h)</div></div>
-        <div class="kpi sm"><div class="v" id="k-eng-stream">—</div><div class="l">tok/s per stream</div></div>
-        <div class="kpi sm"><div class="v" id="k-eng-ss">—</div><div class="l">single-stream decode tok/s</div></div>
         <div class="kpi sm"><div class="v" id="k-eng-pre">—</div><div class="l">prefill tok/s (finished reqs)</div></div>
-        <div class="kpi sm"><div class="v" id="k-eng-dec">—</div><div class="l">decode tok/s (finished reqs)</div></div>
         <div class="kpi sm"><div class="v" id="k-eng-ttft">—</div><div class="l">TTFT p50 s</div></div>
         <div class="kpi sm"><div class="v" id="k-eng-ttft95">—</div><div class="l">TTFT p95 s</div></div>
         <div class="kpi sm"><div class="v" id="k-eng-e2e">—</div><div class="l">end-to-end ms (finished reqs)</div></div>
@@ -288,7 +301,7 @@ function renderEngine(live) {
   put("k-eng-ss", "ss_decode_tps");
   put("k-eng-pre", "prefill_tps"); put("k-eng-dec", "decode_tps");
   put("k-eng-ttft", "ttft_p50"); put("k-eng-ttft95", "ttft_p95");
-  put("k-eng-run", "running"); put("k-eng-wait", "waiting");
+  put("k-eng-run", "running"); put("k-eng-max", "streams_max"); put("k-eng-wait", "waiting");
   put("k-eng-kv", "kv_pct"); put("k-eng-mtp", "mtp_accept"); put("k-eng-prefix", "prefix_hit");
   put("k-eng-req", "req_per_min"); put("k-eng-e2e", "e2e_ms");
 

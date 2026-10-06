@@ -33,6 +33,27 @@ Honesty rules, the same three the rest of the board follows:
     the window, which is the normal state while one long generation is in flight) -- not 0 tok/s;
   * the engine behind the port is swappable and the EXL3 path publishes no /metrics at all, so
     availability is probed on every read and stated, never hardcoded.
+
+Three "decode" numbers, and each answers a different question (adding the second and third is
+what makes the first interpretable -- one of them alone is not a speed, it is a speed under an
+unnamed amount of sharing):
+
+  * ``ss_decode_tps``  -- how fast ONE request decodes when it has the engine to itself. Measured,
+    not divided: taken only from intervals in which exactly one request finished.
+  * ``stream_tps``     -- how fast one request decodes WHILE others are also decoding
+    (``output_tps / running``). The live number; present whenever anything is running.
+  * ``decode_tps``     -- the same per-stream speed as ``stream_tps``, but measured off the counters
+    (generated tokens per decode-second, i.e. per second of decode WORK, which sums the requests
+    that were decoding at the same time). Two independent estimates of one quantity: ``stream_tps``
+    is live and derived from a gauge, this one lags and is derived from finished requests. Note it
+    is NOT the engine-wide rate -- that is ``output_tps``, a factor of ``running`` larger.
+    Completion-windowed, so it is a dash while a long generation is in flight -- correct, not broken.
+
+Read ``stream_tps`` (or ``decode_tps``) against ``ss_decode_tps`` and the batching gain is the
+ratio: 1.0 means concurrency bought nothing (the lanes are splitting a fixed budget), >1 means it
+did. ``ss_decode_tps`` only takes a value from intervals in which exactly ONE request was in
+flight, so on a box that always has company it is a dash most of the time -- by design, because a
+single-stream speed measured while other streams were running is not a single-stream speed.
 """
 from __future__ import annotations
 
@@ -57,7 +78,13 @@ SERIES_CACHE_S = float(os.environ.get("RUNBOARD_ENGINE_SERIES_CACHE_S", "30"))
 # Instantaneous gauges, read straight off the engine (one loopback call, no cache needed).
 # (key, label, unit, metric name, format)
 GAUGE_ITEMS = [
-    ("running", "Requests running", "", "vllm:num_requests_running", "int"),
+    ("running", "Concurrent streams in use", "", "vllm:num_requests_running", "int"),
+    # The lane count -- the `--parallel` the engine was actually started with, read from the
+    # engine rather than assumed. It is half of the reading: 7 of 8 lanes busy and 7 of 8 lanes
+    # free are the same number and opposite situations, so a throughput figure without the cap
+    # beside it cannot be interpreted. An engine that publishes no cap leaves this a DASH, never
+    # an invented number (see FAMILY_ALIASES -- the canonical name has no vLLM counterpart).
+    ("streams_max", "Concurrent streams max", "", "vllm:streams_max", "int"),
     ("waiting", "Requests waiting", "", "vllm:num_requests_waiting", "int"),
     ("kv_pct", "KV cache used", "%", "vllm:kv_cache_usage_perc", "pct"),
 ]
@@ -120,9 +147,21 @@ RATE_ITEMS = [
 FAMILY_ALIASES = {
     "tensorfold": {
         "vllm:num_requests_running": "tensorfold:requests_running",
+        # The lane cap (the engine's `--parallel`, published as
+        # ``tensorfold_health:streams_max``). vLLM publishes no equivalent, so for that family the
+        # canonical name resolves unchanged to a metric that does not exist and the card draws a
+        # dash -- the honest answer to "what is the cap here", as against a plausible 0.
+        "vllm:streams_max": "tensorfold_health:streams_max",
         "vllm:num_requests_waiting": "tensorfold:requests_waiting",
         "vllm:kv_cache_usage_perc": "tensorfold:kv_cache_usage_ratio",
         "vllm:generation_tokens_total": "tensorfold:generation_tokens_total",
+        # The per-request generation-token sum, i.e. the numerator of `decode_tps`. Same quantity,
+        # different spelling ("generated tokens of finished requests"). A MISSED mapping here is
+        # silent -- the expression matches nothing, so the KPI becomes a permanent dash that reads
+        # as "no decode happened". This one was missing until 2026-10-06; the guard
+        # `test_every_name_the_card_queries_is_a_name_this_engine_publishes` is what stops the next
+        # one, by requiring every name in every expression to appear in the engine's own inventory.
+        "vllm:request_generation_tokens_sum": "tensorfold:generation_tokens_total",
         # TensorFold publishes no decode ``_count``; its cumulative finished-request
         # counter plays the same role for the single-stream rule (exactly one request
         # finished in the interval).
